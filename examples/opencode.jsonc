@@ -1,0 +1,22 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugins": [
+    {
+      "package": "fusion",
+      "options": {
+        "enforce": "full",
+        "allowShell": []
+      }
+    }
+  ],
+  "agents": {
+    "fusion-lead": {
+      "mode": "primary",
+      "description": "Fusion lead: plans, decides, reviews, delegates the mechanical work"
+    },
+    "fusion-sidekick": {
+      "mode": "subagent",
+      "description": "Fusion sidekick: executes the lead's plan in its own persistent context"
+    }
+  }
+}

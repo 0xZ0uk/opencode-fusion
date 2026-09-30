@@ -1,0 +1,22 @@
+{
+  "name": "opencode-fusion",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Devin-Fusion-style lead + sidekick model pairing for OpenCode V2, with a TUI picker.",
+  "exports": {
+    ".": "./src/server.ts",
+    "./tui": "./src/tui.ts",
+    "./rpc": "./src/rpc.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@opencode/client": "2.0.19",
+    "@opencode/plugin": "2.0.19",
+    "@opencode/schema": "2.0.19",
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.2"
+  }
+}
