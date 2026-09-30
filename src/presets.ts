@@ -1,0 +1,83 @@
+/**
+ * Model families and subscription presets for the `/fusion` picker.
+ *
+ * Pure module: type-only imports, so it loads under plain Node for tests.
+ */
+import type { ModelInfo } from "@opencode/client"
+
+/**
+ * Model family, for the cross-vendor check. A lead and sidekick from the same
+ * family share blind spots, which throws away the free independent review the
+ * pairing buys you.
+ */
+const FAMILIES: Array<[string, string[]]> = [
+  ["anthropic", ["claude", "anthropic", "opus", "sonnet", "haiku"]],
+  ["openai", ["gpt", "openai", "o1", "o3", "o4", "codex"]],
+  ["google", ["gemini", "google", "gemma"]],
+  ["deepseek", ["deepseek"]],
+  ["zai", ["glm", "z-ai", "zai"]],
+  ["moonshot", ["kimi", "moonshot"]],
+  ["meta", ["llama", "meta"]],
+  ["xai", ["grok", "x-ai", "xai"]],
+  ["mistral", ["mistral", "magistral", "devstral"]],
+  ["qwen", ["qwen", "alibaba"]],
+]
+
+export function familyOf(model: { providerID: string; modelID: string }): string {
+  const haystack = `${model.providerID}/${model.modelID}`.toLowerCase()
+  return FAMILIES.find(([, needles]) => needles.some((needle) => haystack.includes(needle)))?.[0] ?? haystack.split("/")[0] ?? "unknown"
+}
+
+/**
+ * Subscription presets, borrowed from mihneaptu/opencode-fusion's profile set.
+ * Each preset is tied to one provider and lists exact model IDs tried in
+ * order — no substring matching across providers.
+ */
+export type Preset = {
+  readonly name: string
+  readonly providerID?: string
+  readonly lead: readonly string[]
+  readonly sidekick: readonly string[]
+}
+
+export const PRESETS: readonly Preset[] = [
+  { name: "Custom", lead: [], sidekick: [] },
+  {
+    name: "OpenCode Go",
+    providerID: "opencode-go",
+    lead: ["kimi-k3", "kimi-k2.7-code", "kimi-k2.6"],
+    sidekick: ["deepseek-v4.1-flash", "deepseek-v4-flash"],
+  },
+  {
+    name: "OpenCode Zen",
+    providerID: "opencode",
+    lead: ["claude-opus-5-5", "claude-opus-5", "claude-opus-4-8"],
+    sidekick: ["gpt-5.6-luna", "gpt-6-luna"],
+  },
+  {
+    name: "ChatGPT",
+    providerID: "openai",
+    lead: ["gpt-5.6-sol", "gpt-6-sol"],
+    sidekick: ["gpt-5.6-luna", "gpt-6-luna"],
+  },
+  {
+    name: "GitHub Copilot",
+    providerID: "github-copilot",
+    lead: ["claude-sonnet-5.5", "claude-sonnet-5"],
+    sidekick: ["gpt-5.6-luna", "gpt-6-luna"],
+  },
+]
+
+/** First candidate (in list order) present on the preset's provider, else undefined. */
+export function resolvePreset(
+  models: readonly ModelInfo[],
+  preset: Preset,
+  role: "lead" | "sidekick",
+): ModelInfo | undefined {
+  if (!preset.providerID) return undefined
+  for (const candidate of preset[role]) {
+    const found = models.find((model) => model.providerID === preset.providerID && model.modelID === candidate)
+    if (found) return found
+  }
+  return undefined
+}

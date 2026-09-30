@@ -11,54 +11,64 @@ Status: working skeleton, verified against OpenCode `2.0.19`.
 - `/fusion` — pick **lead model → lead effort → sidekick model → sidekick effort** from the
   models OpenCode actually has available, optionally starting from a subscription preset.
   The pair is saved, the agents are re-pointed, and the live session moves onto the lead.
-- `/fusion-stats` — sidekick tokens and what they would have cost at lead rates.
+  Until a pair is picked the agents keep OpenCode's configured/default model.
+- `/fusion-stats` — per-session savings: this lead session's billed cost plus every
+  sidekick session created for it, and what the sidekick's work would have cost at lead
+  rates (priced per message, context tier included).
 - `/fusion-show` (palette) — the active pairing and the live model's variants.
+- A `prompt.footer.status` line on lead sessions: `fusion <lead> → <sidekick>`, plus
+  `· sidekick running` while a handoff is in flight.
 - A `sidekick` tool for the lead: hands work to a **persistent** sidekick session
-  (its context survives handoffs), foreground or background.
+  (its context survives handoffs), foreground or background. Reports are matched to
+  their handoff and end with the list of files the sidekick changed.
+- A startup warning (server log + TUI toast) when the OpenCode version falls outside
+  the tested range (`>=2.0.19 <2.1.0`) — the plugin API may differ.
 
 ## Install
 
-Three pieces: two agent definitions, the server plugin, the TUI plugin.
+Three pieces: the plugin, two agent definitions, and a restart.
 
-**1. Agent definitions** — OpenCode cannot let a plugin *create* an agent, so both must
-exist in config. Copy the examples:
+**1. Plugin** — install from GitHub with the built-in plugin manager:
 
 ```bash
-cp examples/agents/fusion-lead.md     ~/.config/opencode/agents/
-cp examples/agents/fusion-sidekick.md ~/.config/opencode/agents/
+opencode plugin add github:0xZ0uk/opencode-fusion
+```
+
+This loads the server plugin from the package's `.` export; the TUI half loads
+automatically from its `./tui` export. Add the same spec to the `plugins` array in
+`~/.config/opencode/cli.json` only when connecting to a *remote* OpenCode server.
+
+To update later:
+
+```bash
+opencode plugin update opencode-fusion
+```
+
+**2. Agent definitions** — OpenCode cannot let a plugin *create* an agent, so both must
+exist in config. Fetch the two markdown files — the one place the agents are defined —
+and do not also declare them in a config `agents` block:
+
+```bash
+curl -fsSL -o ~/.config/opencode/agents/fusion-lead.md \
+  https://raw.githubusercontent.com/0xZ0uk/opencode-fusion/main/examples/agents/fusion-lead.md
+curl -fsSL -o ~/.config/opencode/agents/fusion-sidekick.md \
+  https://raw.githubusercontent.com/0xZ0uk/opencode-fusion/main/examples/agents/fusion-sidekick.md
 ```
 
 Leave them bare as shipped: the plugin supplies the model, system prompt and permissions
 at startup, and replaces them on every `/fusion` pick.
 
-**2. Server plugin** — OpenCode discovers plugin *directories* under `.opencode/plugins/`
-(project) or `~/.config/opencode/plugins/` (global), each with an `index.ts`:
-
-```bash
-cp -r src ~/.config/opencode/plugins/fusion
-```
-
-**3. TUI plugin** — CLI plugins are configured separately, in `cli.json`:
-
-```jsonc
-// ~/.config/opencode/cli.json
-{
-  "$schema": "https://opencode.ai/v2/cli.json",
-  "plugins": ["/absolute/path/to/opencode-fusion/src/tui.ts"]
-}
-```
-
 Then restart OpenCode (config loads at startup) and run `/fusion`.
 
-To pass options, load the plugin from config by path instead of copying it into a
-discovered `plugins/` directory, so it isn't loaded twice:
+**3. Options** — `plugin add` writes a plain string entry; to pass options, replace it
+with the object form:
 
 ```jsonc
 // opencode.jsonc
 {
   "plugins": [
     {
-      "package": "/absolute/path/to/opencode-fusion/src/index.ts",
+      "package": "github:0xZ0uk/opencode-fusion",
       "options": {
         "enforce": "full",
         "allowShell": ["bun test*", "pnpm test*"],
@@ -73,6 +83,40 @@ discovered `plugins/` directory, so it isn't loaded twice:
 shell commands without prompting; set it to `false` to have the sidekick's edits
 and shell calls follow your normal permission config.
 
+`blockTimeoutSeconds` (default 1800) caps how long a foreground `sidekick` call
+waits before the handoff detaches to the background; the report still arrives as
+a follow-up message.
+
+### Local development
+
+Load the plugin straight from a checkout — the server half by path in
+`opencode.jsonc`, the TUI half by path in `~/.config/opencode/cli.json`:
+
+```jsonc
+// opencode.jsonc
+{ "plugins": [{ "package": "/absolute/path/to/opencode-fusion/src/index.ts", "options": {} }] }
+```
+
+```jsonc
+// ~/.config/opencode/cli.json
+{ "plugins": ["/absolute/path/to/opencode-fusion/src/tui.ts"] }
+```
+
+## The `sidekick` tool
+
+- `action: "delegate"` (default) sends `message` to the sidekick session. Foreground
+  waits bounded by `blockTimeoutSeconds`; `block: false` returns immediately.
+- `action: "status"` lists this session's in-flight handoffs; `action: "cancel"`
+  interrupts the sidekick session. Aborting the lead's turn interrupts the
+  sidekick too.
+- Reports are matched to their handoff marker, not just "the last reply", and end
+  with the changed-file list (with working-tree +A/−D when available).
+- The sidekick session persists per lead session: re-picking the pair re-syncs
+  its model, archived or deleted sessions are pruned and recreated, and the
+  remembered set is a capped LRU. A separate per-lead history remembers every
+  sidekick session ever created, so `reset: true` does not hide older sessions
+  from `/fusion-stats`.
+
 ## Enforced vs advised
 
 Enforced, at the permission layer, applied to the lead agent by the plugin. Rules are
@@ -83,15 +127,31 @@ prompts and external-directory prompts are kept:
 - `grep` and `glob` denied — the lead reads what it asks for, not the whole repo.
 - `shell` deny-by-default with a small allowlist (`git status`, `git diff --stat`,
   `git diff HEAD --stat`, `git log --oneline`) plus whatever `allowShell` adds.
-- `subagent` denied except the sidekick, so delegation is bounded.
+- `subagent` denied entirely in `full` — the `sidekick` tool is the only delegation
+  path. `edits` keeps the deny except for the sidekick agent.
 - the `sidekick` tool refuses calls from any agent other than the lead.
 
-`enforce: "edits"` keeps only the edit deny; `enforce: "off"` makes everything advisory.
+The lead's system prompt is generated from the enforcement level — in `full` it
+lists the allowed shell commands and names the `sidekick` tool as the only
+delegate, so the model is told what it can do instead of discovering the denies.
+
+`enforce: "edits"` keeps only the edit deny and the sidekick-scoped subagent
+allow; `enforce: "off"` makes everything advisory.
 A `permission.hook("evaluate")` backstop re-checks every lead rule at call time,
 covering the window before the agent transform lands (configured denies are final
 and never reach the hook).
 
 Advised, in the prompts: brief specificity, review rigour, cost discipline.
+
+## Development
+
+```bash
+npm run check   # tsc --noEmit + node --test
+```
+
+Tests run on plain Node type stripping against the pure modules (`src/pair.ts`,
+`src/presets.ts`, `src/pricing.ts`, `src/version.ts`, and the exported helpers of
+`src/server.ts`). `src/status.tsx` is the only JSX file.
 
 ## Verified
 
@@ -102,10 +162,13 @@ Against a real `opencode serve` on 2.0.19, with `FUSION_TRACE` pointed at a file
   (`rpc.invalid_input` names the missing key) and storage persists across processes
 - a picked pair lands on the agents: `fusion-lead` = `openrouter/muse/6-astra#high` with
   10 permission rules, `fusion-sidekick` = `openrouter/z-ai/glm-5.3-flash` with 3
-- `tsc --noEmit` is clean against the real `@opencode/plugin` types
+- `tsc --noEmit` and `node --test` are clean against the real `@opencode/plugin` types
 
 Not yet verified (do these before trusting it):
 
+- the `opencode plugin add github:` install path, including the automatic `./tui`
+  loading it relies on
+- the `prompt.footer.status` slot rendering in a real TUI
 - the TUI picker flow itself — no interactive session has exercised the dialogs
 - a real lead↔sidekick handoff through the `sidekick` tool (costs tokens)
 - whether the permission-hook `message` reaches the model, and whether plugin tools

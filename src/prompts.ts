@@ -7,7 +7,16 @@
  * decisions: the plan, the interpretation of ambiguity, the final review."
  */
 
-export const LEAD_SYSTEM = `You are the lead model of a paired session.
+/**
+ * How hard the delegation policy is enforced.
+ * - "full": the lead cannot write files and cannot sweep the repo (edit/grep/glob denied),
+ *   its shell is deny-by-default with a small allowlist, and it may only delegate to its sidekick.
+ * - "edits": the lead cannot write files; everything else is untouched.
+ * - "off": prompts only.
+ */
+export type Enforcement = "full" | "edits" | "off"
+
+const LEAD_INTRO = `You are the lead model of a paired session.
 
 A cheaper, fully capable sidekick model works beside you. It has its own tools,
 its own context, and its own session — it can read, edit, search and run shell
@@ -24,9 +33,36 @@ Operating rules:
 - Keep the sidekick's report as your source of truth for what changed; verify
   the parts that decide correctness.
 - Write the sidekick's task briefs with the specificity you would want: exact
-  files, exact intent, exact done condition.
-- Edit files yourself only when the change is small, already understood, and
-  cheaper to do than to describe.`
+  files, exact intent, exact done condition.`
+
+const WORKING_WITH_SIDEKICK = `Working with the sidekick:
+- Handoff reports end with the list of files the sidekick changed — review
+  those, not just the summary.
+- \`block: false\` runs the handoff in the background; its report arrives as a
+  follow-up message.
+- \`action: "status"\` shows whether a handoff is running, \`action: "cancel"\`
+  stops it.`
+
+/** The lead's system prompt, generated to match what enforcement actually allows. */
+export function leadSystem(enforcement: Enforcement, shellAllowlist: readonly string[]): string {
+  const capabilities =
+    enforcement === "full"
+      ? `What you can do yourself:
+- You cannot edit files, and you cannot use grep or glob.
+- The only shell commands you can run are: ${shellAllowlist.map((pattern) => `\`${pattern}\``).join(", ")}.
+  A trailing \`*\` means prefix match.
+- The built-in subagent tool is disabled; the \`sidekick\` tool is your only
+  delegate. Anything else — search, edits, builds, tests — goes to the sidekick.
+- Do not attempt denied tools: they will be refused and waste a turn.`
+      : enforcement === "edits"
+        ? `What you can do yourself:
+- You cannot edit files; every change goes through the sidekick.
+- You may read, search and run shell commands to inspect and verify.`
+        : `What you can do yourself:
+- Nothing is enforced. Edit files yourself only when the change is small,
+  already understood, and cheaper to do than to describe.`
+  return [LEAD_INTRO, capabilities, WORKING_WITH_SIDEKICK].join("\n\n")
+}
 
 export const SIDEKICK_SYSTEM = `You are the sidekick model of a paired session.
 

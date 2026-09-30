@@ -36,8 +36,10 @@ const pairResult = {
   properties: {
     configured: { type: "boolean" },
     pair,
+    leadAgent: { type: "string" },
+    sidekickAgent: { type: "string" },
   },
-  required: ["configured", "pair"],
+  required: ["configured", "leadAgent", "sidekickAgent"],
   additionalProperties: false,
 }
 
@@ -55,7 +57,15 @@ export const Fusion = {
       output: pairResult,
     },
     setPair: {
-      input: pair,
+      input: {
+        type: "object",
+        properties: {
+          lead: modelRef,
+          sidekick: modelRef,
+        },
+        required: ["lead", "sidekick"],
+        additionalProperties: false,
+      },
       output: pairResult,
     },
     apply: {
@@ -64,6 +74,24 @@ export const Fusion = {
         type: "object",
         properties: { applied: { type: "boolean" } },
         required: ["applied"],
+        additionalProperties: false,
+      },
+    },
+    sidekicks: {
+      input: {
+        type: "object",
+        properties: { sessionID: { type: "string" } },
+        required: ["sessionID"],
+        additionalProperties: false,
+      },
+      output: {
+        type: "object",
+        properties: {
+          current: { type: "string" },
+          sessionIDs: { type: "array", items: { type: "string" } },
+          running: { type: "boolean" },
+        },
+        required: ["sessionIDs", "running"],
         additionalProperties: false,
       },
     },
@@ -77,6 +105,18 @@ export const Fusion = {
           sidekick: modelRef,
         },
         required: ["lead", "sidekick"],
+        additionalProperties: false,
+      },
+    },
+    handoffChanged: {
+      schema: {
+        type: "object",
+        properties: {
+          leadSessionID: { type: "string" },
+          sidekickSessionID: { type: "string" },
+          running: { type: "boolean" },
+        },
+        required: ["leadSessionID", "sidekickSessionID", "running"],
         additionalProperties: false,
       },
     },

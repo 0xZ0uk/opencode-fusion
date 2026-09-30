@@ -20,20 +20,8 @@ export interface FusionPair {
   readonly sidekickAgent: string
 }
 
-export const LEAD_AGENT = "fusion"
+export const LEAD_AGENT = "fusion-lead"
 export const SIDEKICK_AGENT = "fusion-sidekick"
-
-/**
- * Fallback used when nothing is picked yet. Deliberately a pair of cheap-ish
- * models so a fresh install does not silently burn frontier rates: run `/fusion`
- * to choose the real pairing.
- */
-export const DEFAULT_PAIR: FusionPair = {
-  lead: { providerID: "openrouter", modelID: "deepseek/deepseek-v4.1-pro", variant: "max" },
-  sidekick: { providerID: "openrouter", modelID: "deepseek/deepseek-v4.1-flash" },
-  leadAgent: LEAD_AGENT,
-  sidekickAgent: SIDEKICK_AGENT,
-}
 
 export function isModelRef(value: unknown): value is ModelRef {
   if (typeof value !== "object" || value === null) return false
@@ -47,7 +35,7 @@ export function isModelRef(value: unknown): value is ModelRef {
   )
 }
 
-/** Reads a pair out of untrusted storage / RPC input, filling gaps from the default. */
+/** Reads a pair out of untrusted storage / RPC input, filling agent gaps with the defaults. */
 export function normalizePair(value: unknown): FusionPair | undefined {
   if (typeof value !== "object" || value === null) return undefined
   const candidate = value as Record<string, unknown>
@@ -55,14 +43,13 @@ export function normalizePair(value: unknown): FusionPair | undefined {
   return {
     lead: candidate.lead,
     sidekick: candidate.sidekick,
-    leadAgent: typeof candidate.leadAgent === "string" && candidate.leadAgent ? candidate.leadAgent : DEFAULT_PAIR.leadAgent,
+    leadAgent: typeof candidate.leadAgent === "string" && candidate.leadAgent ? candidate.leadAgent : LEAD_AGENT,
     sidekickAgent:
-      typeof candidate.sidekickAgent === "string" && candidate.sidekickAgent
-        ? candidate.sidekickAgent
-        : DEFAULT_PAIR.sidekickAgent,
+      typeof candidate.sidekickAgent === "string" && candidate.sidekickAgent ? candidate.sidekickAgent : SIDEKICK_AGENT,
   }
 }
 
 export function describeModelRef(ref: ModelRef): string {
-  return `${ref.providerID}/${ref.modelID}${ref.variant ? `:${ref.variant}` : ""}`
+  // `#` not `:` — model IDs can themselves contain colons.
+  return `${ref.providerID}/${ref.modelID}${ref.variant ? `#${ref.variant}` : ""}`
 }

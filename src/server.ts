@@ -9,28 +9,26 @@
  */
 import type { Plugin } from "@opencode/plugin"
 import type { Agent } from "@opencode/plugin"
-import type { AgentInfo } from "@opencode/client"
+import type { AgentInfo, FileDiffInfo, OpenCodeEvent } from "@opencode/client"
 import { appendFileSync } from "node:fs"
-import { DEFAULT_PAIR, LEAD_AGENT, SIDEKICK_AGENT, describeModelRef, normalizePair, type FusionPair, type ModelRef } from "./pair.ts"
-import { delegationNudge, LEAD_SYSTEM, SIDEKICK_SYSTEM } from "./prompts.ts"
+import { randomUUID } from "node:crypto"
+import { LEAD_AGENT, SIDEKICK_AGENT, describeModelRef, normalizePair, type FusionPair, type ModelRef } from "./pair.ts"
+import { delegationNudge, leadSystem, SIDEKICK_SYSTEM, type Enforcement } from "./prompts.ts"
+import { versionWarning } from "./version.ts"
 import { Fusion } from "./rpc.ts"
 
 const PAIR_KEY = "pair"
 const CHILDREN_KEY = "sidekick-sessions"
+/** lead session -> every sidekick session created for it, oldest first. */
+const SIDEKICK_HISTORY_KEY = "sidekick-history"
+/** Cap on remembered lead→sidekick pairs; the map doubles as an LRU. */
+const CHILDREN_CAP = 200
 
 type AgentModel = NonNullable<Agent.Info["model"]>
 type StoredJson = Parameters<Plugin.Context["storage"]["set"]>[1]
 type UnknownRecord = Record<string, unknown>
 type Transcript = Awaited<ReturnType<Plugin.Context["session"]["context"]>>
-
-/**
- * How hard the delegation policy is enforced.
- * - "full": the lead cannot write files and cannot sweep the repo (edit/grep/glob denied),
- *   its shell is deny-by-default with a small allowlist, and it may only delegate to its sidekick.
- * - "edits": the lead cannot write files; everything else is untouched.
- * - "off": prompts only.
- */
-type Enforcement = "full" | "edits" | "off"
+type StepEnded = Extract<OpenCodeEvent, { type: "session.step.ended" }>["data"]
 
 type Options = {
   readonly enforce?: Enforcement
@@ -44,6 +42,11 @@ type Options = {
    * stalls the handoff.
    */
   readonly sidekickAutoApprove?: boolean
+  /**
+   * Seconds a foreground `sidekick` call waits before detaching to the
+   * background; the report still arrives as a follow-up message. Default 1800.
+   */
+  readonly blockTimeoutSeconds?: number
 }
 
 type Rule = { action: string; resource: string; effect: "allow" | "deny" | "ask" }
@@ -74,7 +77,7 @@ const toStored = (value: unknown): StoredJson => value as StoredJson
  * Ported from mihneaptu/opencode-fusion, which proved the shape on V1: the
  * point is that "delegates or does nothing" is mechanical, not advisory.
  */
-function leadPermissions(
+export function leadPermissions(
   enforcement: Enforcement,
   shellAllowlist: readonly string[],
   sidekickAgent: string,
@@ -83,8 +86,12 @@ function leadPermissions(
   const permissions: Rule[] = [
     { action: "edit", resource: "*", effect: "deny" },
     { action: "subagent", resource: "*", effect: "deny" },
-    { action: "subagent", resource: sidekickAgent, effect: "allow" },
   ]
+  // "edits" still allows the built-in subagent path to the sidekick; in "full"
+  // the persistent `sidekick` tool is the only delegation path at all.
+  if (enforcement === "edits") {
+    permissions.push({ action: "subagent", resource: sidekickAgent, effect: "allow" })
+  }
   if (enforcement === "full") {
     permissions.push(
       { action: "grep", resource: "*", effect: "deny" },
@@ -107,7 +114,7 @@ const wildcard = (pattern: string, value: string): boolean =>
   ).test(value)
 
 /** Last matching rule wins; undefined when nothing matches. */
-function decide(rules: readonly Rule[], action: string, resource: string): Rule["effect"] | undefined {
+export function decide(rules: readonly Rule[], action: string, resource: string): Rule["effect"] | undefined {
   let effect: Rule["effect"] | undefined
   for (const rule of rules) {
     if (wildcard(rule.action, action) && wildcard(rule.resource, resource)) effect = rule.effect
@@ -115,9 +122,9 @@ function decide(rules: readonly Rule[], action: string, resource: string): Rule[
   return effect
 }
 
-/** Text of the last assistant message in a transcript. */
-function lastAssistantText(messages: Transcript): string {
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
+/** Text of the last non-empty assistant message in `messages[from..to)`. */
+function lastAssistantText(messages: Transcript, from: number, to: number): string {
+  for (let index = to - 1; index >= from; index -= 1) {
     const message = messages[index]
     if (message.type !== "assistant") continue
     const text = message.content
@@ -130,10 +137,57 @@ function lastAssistantText(messages: Transcript): string {
   return ""
 }
 
+/**
+ * Slice one handoff's report out of the sidekick transcript: the user message
+ * carrying the handoff marker (or the prompt's inbox id) starts the slice, the
+ * next user message ends it. Falls back to the last assistant text overall —
+ * the pre-marker behaviour — when the marker is not in the transcript.
+ */
+export function handoffReport(
+  messages: Transcript,
+  handoffID: string,
+  inboxID: string | undefined,
+): { text: string; files: string[]; matched: boolean } {
+  const start = messages.findIndex(
+    (message) => message.type === "user" && (message.metadata?.fusionHandoff === handoffID || message.id === inboxID),
+  )
+  if (start < 0) return { text: lastAssistantText(messages, 0, messages.length), files: [], matched: false }
+  let end = messages.length
+  for (let index = start + 1; index < messages.length; index += 1) {
+    if (messages[index].type === "user") {
+      end = index
+      break
+    }
+  }
+  const seen = new Set<string>()
+  const files: string[] = []
+  for (let index = start + 1; index < end; index += 1) {
+    const message = messages[index]
+    if (message.type !== "assistant") continue
+    for (const file of message.snapshot?.files ?? []) {
+      if (seen.has(file)) continue
+      seen.add(file)
+      files.push(file)
+    }
+  }
+  return { text: lastAssistantText(messages, start + 1, end), files, matched: true }
+}
+
 function normalizeChildren(value: unknown): Record<string, string> {
   const record = asRecord(value) ?? {}
   const out: Record<string, string> = {}
   for (const [key, entry] of Object.entries(record)) if (typeof entry === "string") out[key] = entry
+  return out
+}
+
+export function normalizeHistory(value: unknown): Record<string, string[]> {
+  const record = asRecord(value) ?? {}
+  const out: Record<string, string[]> = {}
+  for (const [key, entry] of Object.entries(record)) {
+    if (!Array.isArray(entry)) continue
+    const list = entry.filter((item): item is string => typeof item === "string")
+    if (list.length > 0) out[key] = list
+  }
   return out
 }
 
@@ -146,17 +200,66 @@ const plugin: Plugin.Plugin = {
     const sidekickAgent = options.sidekickAgent ?? SIDEKICK_AGENT
     const shellAllowlist = [...DEFAULT_SHELL_ALLOWLIST, ...(options.allowShell ?? [])]
     const sidekickAutoApprove = options.sidekickAutoApprove ?? true
+    const blockTimeoutSeconds = options.blockTimeoutSeconds ?? 1800
     const leadRules = leadPermissions(enforcement, shellAllowlist, sidekickAgent)
     trace("setup:start", { enforcement })
 
+    const version = versionWarning(ctx.app?.version)
+    if (version) {
+      console.warn(`[fusion] ${version}`)
+      trace("version:untested", { version: ctx.app?.version })
+    }
+
     const storedPair = normalizePair(await ctx.storage.get(PAIR_KEY))
     trace("pair:loaded", { configured: Boolean(storedPair) })
-    let pair: FusionPair = storedPair ?? { ...DEFAULT_PAIR, leadAgent, sidekickAgent }
+    let pair: FusionPair | undefined = storedPair && { ...storedPair, leadAgent, sidekickAgent }
 
-    // lead session -> sidekick session, kept across restarts.
+    // lead session -> sidekick session, kept across restarts. Insertion order is
+    // recency: reads and writes re-insert so persist can drop the oldest.
     const children = new Map<string, string>(Object.entries(normalizeChildren(await ctx.storage.get(CHILDREN_KEY))))
-    const persistChildren = async () => ctx.storage.set(CHILDREN_KEY, toStored(Object.fromEntries(children)))
+    // lead session -> every sidekick session ever created for it, oldest first.
+    // `reset: true` replaces the child mapping; history keeps the old sessions
+    // reachable so per-session stats do not lose them.
+    const history = new Map<string, string[]>(Object.entries(normalizeHistory(await ctx.storage.get(SIDEKICK_HISTORY_KEY))))
+    for (const [lead, sidekick] of children) {
+      const list = history.get(lead)
+      if (list === undefined) history.set(lead, [sidekick])
+      else if (!list.includes(sidekick)) list.push(sidekick)
+    }
+    const persistChildren = async () => {
+      while (children.size > CHILDREN_CAP) {
+        const oldest = children.keys().next().value
+        if (oldest === undefined) break
+        children.delete(oldest)
+      }
+      while (history.size > CHILDREN_CAP) {
+        const oldest = history.keys().next().value
+        if (oldest === undefined) break
+        history.delete(oldest)
+      }
+      await ctx.storage.set(CHILDREN_KEY, toStored(Object.fromEntries(children)))
+      await ctx.storage.set(SIDEKICK_HISTORY_KEY, toStored(Object.fromEntries(history)))
+    }
 
+    // In-flight handoffs: lead session -> handoff id -> record. Process-local;
+    // a restart loses them, which `status` says out loud.
+    type Handoff = { sessionID: string; inboxID?: string; started: number; block: boolean; cancelled?: boolean }
+    const active = new Map<string, Map<string, Handoff>>()
+
+    // Assigned once the RPC registration lands; a no-op before that.
+    let emitHandoff: (leadSessionID: string, sidekickSessionID: string, running: boolean) => void = () => {}
+
+    const dropHandoff = (leadSessionID: string, handoffID: string) => {
+      const handoffs = active.get(leadSessionID)
+      if (!handoffs) return
+      const sidekickSessionID = handoffs.get(handoffID)?.sessionID
+      handoffs.delete(handoffID)
+      if (handoffs.size === 0) active.delete(leadSessionID)
+      if (sidekickSessionID) emitHandoff(leadSessionID, sidekickSessionID, handoffs.size > 0)
+    }
+
+    // `session.step.ended` events fanned out per sidekick session, for progress.
+    const stepListeners = new Map<string, Set<(data: StepEnded) => void>>()
 
     const toAgentModel = (ref: ModelRef): AgentModel =>
       ({ id: ref.modelID, providerID: ref.providerID, ...(ref.variant ? { variant: ref.variant } : {}) }) as AgentModel
@@ -168,13 +271,13 @@ const plugin: Plugin.Plugin = {
     const agents = await ctx.agent.transform((editor) => {
       trace("transform:visible", editor.list().map((agent) => String(agent.id)))
       editor.update(leadAgent, (lead) => {
-        lead.model = toAgentModel(pair.lead)
-        lead.system = LEAD_SYSTEM
+        if (pair) lead.model = toAgentModel(pair.lead)
+        lead.system = leadSystem(enforcement, shellAllowlist)
         lead.permissions = [...lead.permissions, ...leadRules]
         sawAgents = true
       })
       editor.update(sidekickAgent, (sidekick) => {
-        sidekick.model = toAgentModel(pair.sidekick)
+        if (pair) sidekick.model = toAgentModel(pair.sidekick)
         sidekick.system = SIDEKICK_SYSTEM
         sidekick.mode = "subagent"
         sidekick.permissions = [
@@ -209,6 +312,7 @@ const plugin: Plugin.Plugin = {
       lastAttempt = Date.now()
       applying = true
       try {
+        if (!pair) return
         const listed = await ctx.agent.list()
         const agents: AgentInfo[] = listed.data ?? []
         trace("agents:listed", agents.map((agent) => `${agent.id}=${agent.model?.id ?? "none"}`))
@@ -229,17 +333,99 @@ const plugin: Plugin.Plugin = {
 
     const ensureSidekickSession = async (leadSessionID: string): Promise<string> => {
       const existing = children.get(leadSessionID)
-      if (existing) return existing
+      if (existing) {
+        children.delete(leadSessionID)
+        children.set(leadSessionID, existing)
+        try {
+          const session = await ctx.session.get({ sessionID: existing })
+          if (!session.time.archived) {
+            const current = session.model
+            if (
+              pair &&
+              (current?.id !== pair.sidekick.modelID ||
+                current?.providerID !== pair.sidekick.providerID ||
+                current?.variant !== pair.sidekick.variant)
+            ) {
+              // A re-pair leaves the stored session on the old model; re-sync it.
+              await ctx.session.switchModel({ sessionID: existing, model: toAgentModel(pair.sidekick) })
+            }
+            return existing
+          }
+        } catch {
+          /* the stored session is gone */
+        }
+        children.delete(leadSessionID)
+      }
       const created = await ctx.session.create({
         agent: sidekickAgent,
-        model: toAgentModel(pair.sidekick),
-        title: `Fusion sidekick · ${pair.sidekick.modelID}`,
+        ...(pair ? { model: toAgentModel(pair.sidekick) } : {}),
+        title: pair ? `Fusion sidekick · ${pair.sidekick.modelID}` : "Fusion sidekick",
         metadata: { fusionLeadSession: leadSessionID },
       })
       const id = String(created.id)
       children.set(leadSessionID, id)
+      const list = history.get(leadSessionID)
+      if (list === undefined) history.set(leadSessionID, [id])
+      else if (!list.includes(id)) list.push(id)
       await persistChildren()
       return id
+    }
+
+    /**
+     * Report text, then the changed-file list. Per-file +A/−D stats come from
+     * the working-tree diff when the checkout offers one; the file paths stand
+     * alone otherwise.
+     */
+    const formatReport = async (
+      sessionID: string,
+      report: { text: string; files: string[]; matched: boolean },
+    ): Promise<string> => {
+      let stats: Map<string, FileDiffInfo> | undefined
+      try {
+        const diff = await ctx.vcs.diff({ mode: "working" })
+        stats = new Map(diff.data.map((entry) => [entry.file, entry]))
+      } catch {
+        /* per-file stats are best-effort */
+      }
+      const lines = [report.text || "finished with no text report", ""]
+      if (report.files.length === 0) {
+        lines.push("Changed files: none recorded")
+      } else {
+        lines.push("Changed files:")
+        for (const file of report.files) {
+          const entry = stats?.get(file)
+          lines.push(entry ? `${file} (+${entry.additions} −${entry.deletions} working tree)` : file)
+        }
+      }
+      if (!report.matched) {
+        lines.push("(report matched by recency, not by handoff — may belong to another handoff)")
+      }
+      lines.push("", `sidekick session: ${sessionID}`)
+      return lines.join("\n")
+    }
+
+    /** Wait out a background handoff, then post the report into the lead session. */
+    const finishInBackground = (leadSessionID: string, handoffID: string) => {
+      const handoff = active.get(leadSessionID)?.get(handoffID)
+      if (!handoff) return
+      const sessionID = handoff.sessionID
+      void (async () => {
+        try {
+          await ctx.session.wait({ sessionID })
+          if (handoff.cancelled) return
+          const report = handoffReport(await ctx.session.context({ sessionID }), handoffID, handoff.inboxID)
+          const text = await formatReport(sessionID, report)
+          await ctx.session.synthetic({
+            sessionID: leadSessionID,
+            text: `<sidekick_report session="${sessionID}" handoff="${handoffID}">\n${text}\n</sidekick_report>`,
+            resume: true,
+          })
+        } catch (error) {
+          console.warn(`[fusion] sidekick background report failed: ${String(error)}`)
+        } finally {
+          dropHandoff(leadSessionID, handoffID)
+        }
+      })()
     }
 
     const tools = await ctx.tool.transform((editor) => {
@@ -247,52 +433,167 @@ const plugin: Plugin.Plugin = {
       editor.add({
         name: "sidekick",
         description:
-          "Delegate work to the paired sidekick model. The sidekick is a full agent with its own persistent context and toolset. " +
-          "Use it for implementation, refactors, running builds and tests, and searching across many files. " +
-          "Foreground calls wait for the report; `block: false` returns immediately and the report arrives as a follow-up message. " +
+          "Delegate work to the paired sidekick model (action \"delegate\", the default). The sidekick is a full agent " +
+          "with its own persistent context and toolset — use it for implementation, refactors, builds and tests, and " +
+          "searches across many files. Foreground calls wait for the report; a call that outlives the configured " +
+          "timeout detaches to the background and the report arrives as a follow-up message, as does every " +
+          "`block: false` report. Reports end with the list of files the sidekick changed. `action: \"status\"` " +
+          "lists this session's in-flight handoffs, `action: \"cancel\"` interrupts the sidekick session. " +
           "Pass `reset: true` to start a fresh sidekick context.",
         input: {
           type: "object",
           properties: {
-            message: { type: "string", description: "What the sidekick should do, with files and a done condition." },
+            action: {
+              type: "string",
+              enum: ["delegate", "status", "cancel"],
+              description: "delegate (default), list in-flight handoffs, or interrupt the sidekick session",
+            },
+            message: { type: "string", description: "What the sidekick should do, with files and a done condition. Required for delegate." },
             block: { type: "boolean", description: "Wait for the report. Default true." },
             reset: { type: "boolean", description: "Discard the current sidekick context and start over." },
           },
-          required: ["message"],
+          required: [],
           additionalProperties: false,
         },
         execute: async (input, context) => {
           if (String(context.agent) !== leadAgent) {
             return { content: `sidekick: only the ${leadAgent} agent can delegate to the sidekick` }
           }
-          const args = (input ?? {}) as { message?: unknown; block?: unknown; reset?: unknown }
-          const message = typeof args.message === "string" ? args.message : ""
-          if (!message) return { content: "sidekick: `message` is required" }
+          const args = (input ?? {}) as { action?: unknown; message?: unknown; block?: unknown; reset?: unknown }
           const leadSessionID = String(context.sessionID)
+          const action = args.action === "status" || args.action === "cancel" ? args.action : "delegate"
+
+          if (action === "status") {
+            const running = [...(active.get(leadSessionID)?.entries() ?? [])].map(
+              ([id, handoff]) =>
+                `${id.slice(0, 8)} · ${handoff.block ? "foreground" : "background"} · ${Math.round((Date.now() - handoff.started) / 1000)}s`,
+            )
+            return {
+              content: [
+                running.length > 0 ? `handoffs in flight:\n${running.join("\n")}` : "no handoff in flight",
+                `sidekick session: ${children.get(leadSessionID) ?? "none"}`,
+                "(only handoffs started by this process are listed)",
+              ].join("\n"),
+            }
+          }
+
+          if (action === "cancel") {
+            const sessionID = children.get(leadSessionID)
+            if (!sessionID) return { content: "sidekick: no sidekick session" }
+            const handoffs = [...(active.get(leadSessionID)?.entries() ?? [])]
+            for (const [, handoff] of handoffs) handoff.cancelled = true
+            const { interrupted } = await ctx.session.interrupt({ sessionID })
+            return {
+              content:
+                `sidekick: cancelled ${handoffs.length > 0 ? handoffs.map(([id]) => id.slice(0, 8)).join(", ") : "nothing in flight"}` +
+                ` (interrupted=${interrupted})`,
+            }
+          }
+
+          const message = typeof args.message === "string" ? args.message : ""
+          if (!message) return { content: "sidekick: `message` is required for action \"delegate\"" }
           if (args.reset === true) {
             children.delete(leadSessionID)
             await persistChildren()
           }
           const sessionID = await ensureSidekickSession(leadSessionID)
-          await ctx.session.prompt({ sessionID, text: message })
-          if (args.block !== false) {
-            await ctx.session.wait({ sessionID })
-            const report = lastAssistantText(await ctx.session.context({ sessionID }))
-            return { content: report || "sidekick: finished with no text report" }
+          const handoffID = randomUUID()
+          const inbox = await ctx.session.prompt({
+            sessionID,
+            text: message,
+            metadata: { fusionHandoff: handoffID, fusionLeadSession: leadSessionID },
+          })
+          const block = args.block !== false
+          let handoffs = active.get(leadSessionID)
+          if (!handoffs) {
+            handoffs = new Map()
+            active.set(leadSessionID, handoffs)
           }
-          void (async () => {
+          handoffs.set(handoffID, { sessionID, inboxID: String(inbox.id), started: Date.now(), block })
+          emitHandoff(leadSessionID, sessionID, true)
+
+          const progress = async (update: Record<string, unknown>) => {
             try {
-              await ctx.session.wait({ sessionID })
-              const report = lastAssistantText(await ctx.session.context({ sessionID }))
-              await ctx.session.synthetic({
-                sessionID: leadSessionID,
-                text: `<sidekick_report session="${sessionID}">\n${report || "no text report"}\n</sidekick_report>`,
-              })
-            } catch (error) {
-              console.warn(`[fusion] sidekick background report failed: ${String(error)}`)
+              await context.progress(update)
+            } catch {
+              /* progress is cosmetic */
             }
-          })()
-          return { content: `sidekick started in session ${sessionID}; its report will arrive as a follow-up message.` }
+          }
+          await progress({ sessionID, title: "sidekick running", status: "running" })
+
+          if (!block) {
+            finishInBackground(leadSessionID, handoffID)
+            return {
+              content: `sidekick started in session ${sessionID} (handoff ${handoffID.slice(0, 8)}); its report will arrive as a follow-up message.`,
+              metadata: { sessionID, handoffID },
+            }
+          }
+
+          let steps = 0
+          const stepFiles: string[] = []
+          const onStep = (data: StepEnded) => {
+            steps += 1
+            for (const file of data.files ?? []) {
+              if (!stepFiles.includes(file)) stepFiles.push(file)
+            }
+            void progress({ sessionID, title: `sidekick · step ${steps}`, status: "running", steps, files: [...stepFiles] })
+          }
+          let listeners = stepListeners.get(sessionID)
+          if (!listeners) {
+            listeners = new Set()
+            stepListeners.set(sessionID, listeners)
+          }
+          listeners.add(onStep)
+          try {
+            const signal = AbortSignal.any([context.signal, AbortSignal.timeout(blockTimeoutSeconds * 1000)])
+            const tripped = new Promise<void>((resolve) => {
+              if (signal.aborted) resolve()
+              else signal.addEventListener("abort", () => resolve(), { once: true })
+            })
+            let done = false
+            try {
+              // The signal is also raced, not only passed: a host that ignores
+              // request signals must not hang the lead's turn forever.
+              await Promise.race([
+                ctx.session.wait({ sessionID }, { signal }).then(() => {
+                  done = true
+                }),
+                tripped,
+              ])
+            } catch (error) {
+              if (!signal.aborted) throw error
+            }
+            if (context.signal.aborted) {
+              try {
+                await ctx.session.interrupt({ sessionID })
+              } catch {
+                /* interrupting is best-effort */
+              }
+              dropHandoff(leadSessionID, handoffID)
+              return {
+                content: "sidekick: cancelled — the lead's turn was aborted; the sidekick was interrupted.",
+                metadata: { sessionID, handoffID },
+              }
+            }
+            if (!done) {
+              const handoff = handoffs.get(handoffID)
+              if (handoff) handoff.block = false
+              finishInBackground(leadSessionID, handoffID)
+              return {
+                content: `sidekick: still running after ${blockTimeoutSeconds}s; detached to the background — its report will arrive as a follow-up message. Use action "status"/"cancel" to manage it.`,
+                metadata: { sessionID, handoffID },
+              }
+            }
+            const report = handoffReport(await ctx.session.context({ sessionID }), handoffID, handoffs.get(handoffID)?.inboxID)
+            dropHandoff(leadSessionID, handoffID)
+            return {
+              content: await formatReport(sessionID, report),
+              metadata: { sessionID, handoffID, files: report.files },
+            }
+          } finally {
+            listeners.delete(onStep)
+            if (listeners.size === 0) stepListeners.delete(sessionID)
+          }
         },
       })
     })
@@ -320,23 +621,38 @@ const plugin: Plugin.Plugin = {
 
     const rpc = await ctx.rpc.register(Fusion, {
       getPair: async () => ({
-        configured: normalizePair(await ctx.storage.get(PAIR_KEY)) !== undefined,
-        pair: { ...pair, leadAgent, sidekickAgent },
+        configured: pair !== undefined,
+        ...(pair ? { pair } : {}),
+        leadAgent,
+        sidekickAgent,
       }),
       setPair: async (input) => {
         const next = normalizePair(input)
-        if (!next) return { configured: false, pair: { ...pair, leadAgent, sidekickAgent } }
+        if (!next) return { configured: pair !== undefined, ...(pair ? { pair } : {}), leadAgent, sidekickAgent }
         pair = { ...next, leadAgent, sidekickAgent }
         await ctx.storage.set(PAIR_KEY, toStored(pair))
         await ctx.agent.reload()
         await rpc.events.emit("pairChanged", { lead: pair.lead, sidekick: pair.sidekick })
-        return { configured: true, pair }
+        return { configured: true, pair, leadAgent, sidekickAgent }
       },
       apply: async () => {
         await ctx.agent.reload()
         return { applied: true }
       },
+      sidekicks: async (input) => {
+        const sessionID = String((input as { sessionID: string }).sessionID)
+        const current = children.get(sessionID)
+        const recorded = history.get(sessionID) ?? (current ? [current] : [])
+        return {
+          current,
+          sessionIDs: current && !recorded.includes(current) ? [...recorded, current] : recorded,
+          running: (active.get(sessionID)?.size ?? 0) > 0,
+        }
+      },
     })
+    emitHandoff = (leadSessionID, sidekickSessionID, running) => {
+      void rpc.events.emit("handoffChanged", { leadSessionID, sidekickSessionID, running }).catch(() => {})
+    }
 
     // Late pass for the cold-start ordering problem above: config agents are
     // registered after setup, and only a reload replays our transform.
@@ -347,7 +663,30 @@ const plugin: Plugin.Plugin = {
     void (async () => {
       try {
         for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
-          if (event.type === "agent.updated") void ensureApplied()
+          if (event.type === "agent.updated") {
+            void ensureApplied()
+          } else if (event.type === "session.deleted") {
+            const sessionID = String(event.data.sessionID)
+            let removed = children.delete(sessionID)
+            for (const [leadID, sidekickID] of [...children]) {
+              if (sidekickID === sessionID) {
+                children.delete(leadID)
+                removed = true
+              }
+            }
+            if (history.delete(sessionID)) removed = true
+            for (const [leadID, list] of [...history]) {
+              const kept = list.filter((id) => id !== sessionID)
+              if (kept.length === list.length) continue
+              if (kept.length === 0) history.delete(leadID)
+              else history.set(leadID, kept)
+              removed = true
+            }
+            if (removed) void persistChildren()
+          } else if (event.type === "session.step.ended") {
+            const listeners = stepListeners.get(String(event.data.sessionID))
+            if (listeners) for (const listener of listeners) listener(event.data)
+          }
         }
       } catch {
         /* the stream ends at shutdown */
@@ -357,8 +696,9 @@ const plugin: Plugin.Plugin = {
     trace("rpc:registered")
 
     console.info(
-      `[fusion] ready — lead ${describeModelRef(pair.lead)} (${leadAgent}) · sidekick ${describeModelRef(pair.sidekick)} (${sidekickAgent})` +
-        (storedPair ? "" : " · no pair picked yet: run /fusion"),
+      pair
+        ? `[fusion] ready — lead ${describeModelRef(pair.lead)} (${leadAgent}) · sidekick ${describeModelRef(pair.sidekick)} (${sidekickAgent})`
+        : `[fusion] ready — no pair picked yet: run /fusion — agents use OpenCode's default model`,
     )
 
     return async () => {

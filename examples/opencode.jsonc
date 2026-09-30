@@ -6,18 +6,9 @@
       "options": {
         "enforce": "full",
         "allowShell": [],
-        "sidekickAutoApprove": true
+        "sidekickAutoApprove": true,
+        "blockTimeoutSeconds": 1800
       }
     }
-  ],
-  "agents": {
-    "fusion-lead": {
-      "mode": "primary",
-      "description": "Fusion lead: plans, decides, reviews, delegates the mechanical work"
-    },
-    "fusion-sidekick": {
-      "mode": "subagent",
-      "description": "Fusion sidekick: executes the lead's plan in its own persistent context"
-    }
-  }
+  ]
 }
