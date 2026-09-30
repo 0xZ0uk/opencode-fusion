@@ -38,11 +38,19 @@ This loads the server plugin from the package's `.` export; the TUI half loads
 automatically from its `./tui` export. Add the same spec to the `plugins` array in
 `~/.config/opencode/cli.json` only when connecting to a *remote* OpenCode server.
 
-To update later:
+To update later, pass the *configured target* — the plugin id is rejected with
+`Plugin is not configured`, and omitting the argument updates every outdated plugin:
 
 ```bash
-opencode plugin update opencode-fusion
+opencode plugin update github:0xZ0uk/opencode-fusion
 ```
+
+A GitHub install is tracked by commit, not by the `version` in `package.json`, so a
+new commit is enough to make an update available. Then **restart the TUI**: a running
+instance keeps the module it already loaded, and OpenCode reuses the cached install
+unless an update explicitly re-resolves it. If a restart still shows the old
+behaviour, drop the cached copy — it lives in
+`~/.cache/opencode/npm/git-opencode-fusion-*` and is rebuilt on demand.
 
 **2. Agent definitions** — OpenCode cannot let a plugin *create* an agent, so both must
 exist in config. Fetch the two markdown files — the one place the agents are defined —
@@ -171,10 +179,13 @@ And against a real TUI on 2.0.20 (`opencode --standalone`, plugin loaded from a
 - the keymap layer registers: `fusion.pair`, `fusion.stats` and `fusion.show` are
   reachable, and `keymap.dispatch("fusion.show")` opens the pairing dialog
 
+And through the real `github:0xZ0uk/opencode-fusion` install path on 2.0.20:
+
+- the spec resolves to the pushed commit, `keymap.tsx` lands in the install, and the
+  TUI plugin's setup completes — no `Keymap.Provider is missing`
+
 Not yet verified (do these before trusting it):
 
-- the `opencode plugin add github:` install path, including the automatic `./tui`
-  loading it relies on
 - the `prompt.footer.status` slot rendering in a real TUI
 - the TUI picker flow itself — the dialogs have been opened programmatically, not
   driven by hand
