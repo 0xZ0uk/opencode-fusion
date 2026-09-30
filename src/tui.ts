@@ -18,6 +18,7 @@ import { EMPTY_TOKENS, addTokens, money, priceMessages, tierFor, tokensOf, type 
 import { PRESETS, familyOf, resolvePreset } from "./presets.ts"
 import { versionWarning } from "./version.ts"
 import { claimStatus } from "./status.tsx"
+import { claimKeymap } from "./keymap.tsx"
 
 /** Dialog value meaning "use the model's default effort". */
 const MODEL_DEFAULT = ""
@@ -383,7 +384,9 @@ const plugin: Plugin.Definition = {
       })
     }
 
-    context.keymap.layer(() => ({
+    // Registered through a slot, not `context.keymap.layer` directly: the
+    // keymap layers need the host's Solid providers. See src/keymap.tsx.
+    const disposeKeymap = claimKeymap(context, () => ({
       mode: "global",
       priority: 10,
       commands: [
@@ -420,6 +423,7 @@ const plugin: Plugin.Definition = {
     return () => {
       offPair()
       offHandoff()
+      disposeKeymap()
       disposeStatus()
     }
   },

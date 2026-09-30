@@ -151,7 +151,7 @@ npm run check   # tsc --noEmit + node --test
 
 Tests run on plain Node type stripping against the pure modules (`src/pair.ts`,
 `src/presets.ts`, `src/pricing.ts`, `src/version.ts`, and the exported helpers of
-`src/server.ts`). `src/status.tsx` is the only JSX file.
+`src/server.ts`). `src/status.tsx` and `src/keymap.tsx` are the only JSX files.
 
 ## Verified
 
@@ -164,19 +164,28 @@ Against a real `opencode serve` on 2.0.19, with `FUSION_TRACE` pointed at a file
   10 permission rules, `fusion-sidekick` = `openrouter/z-ai/glm-5.3-flash` with 3
 - `tsc --noEmit` and `node --test` are clean against the real `@opencode/plugin` types
 
+And against a real TUI on 2.0.20 (`opencode --standalone`, plugin loaded from a
+`plugins/fusion` directory):
+
+- the TUI plugin loads — setup completes, stays active, and its cleanups run on exit
+- the keymap layer registers: `fusion.pair`, `fusion.stats` and `fusion.show` are
+  reachable, and `keymap.dispatch("fusion.show")` opens the pairing dialog
+
 Not yet verified (do these before trusting it):
 
 - the `opencode plugin add github:` install path, including the automatic `./tui`
   loading it relies on
 - the `prompt.footer.status` slot rendering in a real TUI
-- the TUI picker flow itself — no interactive session has exercised the dialogs
+- the TUI picker flow itself — the dialogs have been opened programmatically, not
+  driven by hand
 - a real lead↔sidekick handoff through the `sidekick` tool (costs tokens)
 - whether the permission-hook `message` reaches the model, and whether plugin tools
   appear inside subagent sessions
 
 ## Ordering facts that will bite you
 
-Both were found the hard way; they are why `server.ts` has a deferred re-apply.
+These were found the hard way; the first is why `server.ts` has a deferred
+re-apply, the second is why the keymap lives in a slot.
 
 1. **Plugins load before config agents exist.** During the first `agent.transform` the
    editor cannot see `fusion-lead` at all, so a `get()`-and-mutate transform silently does
@@ -184,6 +193,12 @@ Both were found the hard way; they are why `server.ts` has a deferred re-apply.
    once the agents have landed.
 2. **`ctx.agent.reload()` emits `agent.updated`.** A reactive "reload whenever agents
    change" loop will storm; the re-apply is capped and time-gated for that reason.
+3. **`context.keymap.layer` only works inside the host's component tree.** Called from
+   `setup` it throws `Keymap.Provider is missing` and the *whole* TUI plugin fails to
+   load — setup, status slot and all. `src/keymap.tsx` registers the layer from a
+   component rendered through the `app` slot instead, which is how OpenCode's own
+   plugins do it. The same trap applies to any Solid-context API the host exposes on
+   `context`: only `ui.slot` renders get them.
 
 ## Credit
 
