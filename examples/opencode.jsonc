@@ -2,10 +2,11 @@
   "$schema": "https://opencode.ai/config.json",
   "plugins": [
     {
-      "package": "fusion",
+      "package": "/absolute/path/to/opencode-fusion/src/index.ts",
       "options": {
         "enforce": "full",
-        "allowShell": []
+        "allowShell": [],
+        "sidekickAutoApprove": true
       }
     }
   ],

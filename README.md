@@ -50,33 +50,46 @@ cp -r src ~/.config/opencode/plugins/fusion
 
 Then restart OpenCode (config loads at startup) and run `/fusion`.
 
-Plugin options, if you need them:
+To pass options, load the plugin from config by path instead of copying it into a
+discovered `plugins/` directory, so it isn't loaded twice:
 
 ```jsonc
 // opencode.jsonc
 {
   "plugins": [
     {
-      "package": "fusion",
-      "options": { "enforce": "full", "allowShell": ["bun test*", "pnpm test*"] }
+      "package": "/absolute/path/to/opencode-fusion/src/index.ts",
+      "options": {
+        "enforce": "full",
+        "allowShell": ["bun test*", "pnpm test*"],
+        "sidekickAutoApprove": true
+      }
     }
   ]
 }
 ```
 
+`sidekickAutoApprove` defaults to `true`, letting the sidekick edit files and run
+shell commands without prompting; set it to `false` to have the sidekick's edits
+and shell calls follow your normal permission config.
+
 ## Enforced vs advised
 
-Enforced, at the permission layer, applied to the lead agent by the plugin:
+Enforced, at the permission layer, applied to the lead agent by the plugin. Rules are
+appended to the agent's existing permissions, so OpenCode defaults like `.env` read
+prompts and external-directory prompts are kept:
 
 - `edit` denied — the lead has no way to change a file except by delegating.
 - `grep` and `glob` denied — the lead reads what it asks for, not the whole repo.
 - `shell` deny-by-default with a small allowlist (`git status`, `git diff --stat`,
   `git diff HEAD --stat`, `git log --oneline`) plus whatever `allowShell` adds.
 - `subagent` denied except the sidekick, so delegation is bounded.
+- the `sidekick` tool refuses calls from any agent other than the lead.
 
 `enforce: "edits"` keeps only the edit deny; `enforce: "off"` makes everything advisory.
-A `permission.hook("evaluate")` backstop denies lead `edit` calls at call time as well,
-because a released V2 build was reported to leak a denied `edit` tool to the plan agent.
+A `permission.hook("evaluate")` backstop re-checks every lead rule at call time,
+covering the window before the agent transform lands (configured denies are final
+and never reach the hook).
 
 Advised, in the prompts: brief specificity, review rigour, cost discipline.
 

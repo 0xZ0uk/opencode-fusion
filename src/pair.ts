@@ -20,7 +20,7 @@ export interface FusionPair {
   readonly sidekickAgent: string
 }
 
-export const LEAD_AGENT = "fusion-lead"
+export const LEAD_AGENT = "fusion"
 export const SIDEKICK_AGENT = "fusion-sidekick"
 
 /**

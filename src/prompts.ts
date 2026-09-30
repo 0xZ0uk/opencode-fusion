@@ -42,6 +42,6 @@ Operating rules:
 - Report back with what changed, what you verified, and anything that still
   needs the lead's judgement. Keep it short and factual.`
 
-/** Surfaced when the plugin asks before letting the lead edit directly. */
-export const DELEGATION_NUDGE =
-  "Fusion: the lead is about to edit files directly. Mechanical work belongs to the sidekick subagent."
+/** Surfaced when the permission hook denies a lead action at call time. */
+export const delegationNudge = (action: string): string =>
+  `Fusion: the lead may not use "${action}". Delegate this to the sidekick with the \`sidekick\` tool.`

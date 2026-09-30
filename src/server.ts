@@ -12,7 +12,7 @@ import type { Agent } from "@opencode/plugin"
 import type { AgentInfo } from "@opencode/client"
 import { appendFileSync } from "node:fs"
 import { DEFAULT_PAIR, LEAD_AGENT, SIDEKICK_AGENT, describeModelRef, normalizePair, type FusionPair, type ModelRef } from "./pair.ts"
-import { DELEGATION_NUDGE, LEAD_SYSTEM, SIDEKICK_SYSTEM } from "./prompts.ts"
+import { delegationNudge, LEAD_SYSTEM, SIDEKICK_SYSTEM } from "./prompts.ts"
 import { Fusion } from "./rpc.ts"
 
 const PAIR_KEY = "pair"
@@ -21,6 +21,7 @@ const CHILDREN_KEY = "sidekick-sessions"
 type AgentModel = NonNullable<Agent.Info["model"]>
 type StoredJson = Parameters<Plugin.Context["storage"]["set"]>[1]
 type UnknownRecord = Record<string, unknown>
+type Transcript = Awaited<ReturnType<Plugin.Context["session"]["context"]>>
 
 /**
  * How hard the delegation policy is enforced.
@@ -37,7 +38,15 @@ type Options = {
   readonly sidekickAgent?: string
   /** Extra shell patterns the lead may run, appended to the default allowlist. */
   readonly allowShell?: readonly string[]
+  /**
+   * Let the sidekick edit files and run shell commands without asking. Default
+   * true: a permission prompt in the sidekick's session is easy to miss and
+   * stalls the handoff.
+   */
+  readonly sidekickAutoApprove?: boolean
 }
+
+type Rule = { action: string; resource: string; effect: "allow" | "deny" | "ask" }
 
 /** Commands the lead keeps: cheap verification and inspection, nothing that writes. */
 const DEFAULT_SHELL_ALLOWLIST = ["git status*", "git diff --stat*", "git diff HEAD --stat*", "git log --oneline*"]
@@ -69,9 +78,9 @@ function leadPermissions(
   enforcement: Enforcement,
   shellAllowlist: readonly string[],
   sidekickAgent: string,
-): Array<{ action: string; resource: string; effect: "allow" | "deny" | "ask" }> {
+): Rule[] {
   if (enforcement === "off") return []
-  const permissions: Array<{ action: string; resource: string; effect: "allow" | "deny" | "ask" }> = [
+  const permissions: Rule[] = [
     { action: "edit", resource: "*", effect: "deny" },
     { action: "subagent", resource: "*", effect: "deny" },
     { action: "subagent", resource: sidekickAgent, effect: "allow" },
@@ -87,24 +96,32 @@ function leadPermissions(
   return permissions
 }
 
-/** Text of the last assistant message in a transcript, whatever the envelope looks like. */
-function lastAssistantText(transcript: unknown): string {
-  const root = Array.isArray(transcript) ? transcript : (asRecord(transcript)?.messages as unknown[] | undefined) ?? []
-  for (let index = root.length - 1; index >= 0; index -= 1) {
-    const message = asRecord(root[index])
-    if (!message || message.role !== "assistant") continue
-    const parts = Array.isArray(message.content)
-      ? message.content
-      : Array.isArray(message.parts)
-        ? message.parts
-        : Array.isArray(message.message)
-          ? message.message
-          : []
-    const text = parts
-      .map((part) => {
-        const record = asRecord(part)
-        return record?.type === "text" && typeof record.text === "string" ? record.text : ""
-      })
+/** `*` is the only wildcard; everything else in the pattern is literal. */
+const wildcard = (pattern: string, value: string): boolean =>
+  new RegExp(
+    `^${pattern
+      .split("*")
+      .map((literal) => literal.replace(/[.+?^${}()|[\]\\]/g, "\\$&"))
+      .join(".*")}$`,
+    "s",
+  ).test(value)
+
+/** Last matching rule wins; undefined when nothing matches. */
+function decide(rules: readonly Rule[], action: string, resource: string): Rule["effect"] | undefined {
+  let effect: Rule["effect"] | undefined
+  for (const rule of rules) {
+    if (wildcard(rule.action, action) && wildcard(rule.resource, resource)) effect = rule.effect
+  }
+  return effect
+}
+
+/** Text of the last assistant message in a transcript. */
+function lastAssistantText(messages: Transcript): string {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]
+    if (message.type !== "assistant") continue
+    const text = message.content
+      .map((part) => (part.type === "text" ? part.text : ""))
       .filter(Boolean)
       .join("\n\n")
       .trim()
@@ -128,6 +145,8 @@ const plugin: Plugin.Plugin = {
     const leadAgent = options.leadAgent ?? LEAD_AGENT
     const sidekickAgent = options.sidekickAgent ?? SIDEKICK_AGENT
     const shellAllowlist = [...DEFAULT_SHELL_ALLOWLIST, ...(options.allowShell ?? [])]
+    const sidekickAutoApprove = options.sidekickAutoApprove ?? true
+    const leadRules = leadPermissions(enforcement, shellAllowlist, sidekickAgent)
     trace("setup:start", { enforcement })
 
     const storedPair = normalizePair(await ctx.storage.get(PAIR_KEY))
@@ -151,7 +170,7 @@ const plugin: Plugin.Plugin = {
       editor.update(leadAgent, (lead) => {
         lead.model = toAgentModel(pair.lead)
         lead.system = LEAD_SYSTEM
-        lead.permissions = leadPermissions(enforcement, shellAllowlist, sidekickAgent)
+        lead.permissions = [...lead.permissions, ...leadRules]
         sawAgents = true
       })
       editor.update(sidekickAgent, (sidekick) => {
@@ -159,9 +178,14 @@ const plugin: Plugin.Plugin = {
         sidekick.system = SIDEKICK_SYSTEM
         sidekick.mode = "subagent"
         sidekick.permissions = [
-          { action: "edit", resource: "*", effect: "allow" },
-          { action: "shell", resource: "*", effect: "allow" },
-          { action: "subagent", resource: "*", effect: "deny" },
+          ...sidekick.permissions,
+          ...(sidekickAutoApprove
+            ? [
+                { action: "edit", resource: "*", effect: "allow" as const },
+                { action: "shell", resource: "*", effect: "allow" as const },
+              ]
+            : []),
+          { action: "subagent", resource: "*", effect: "deny" as const },
         ]
         sawAgents = true
       })
@@ -238,6 +262,9 @@ const plugin: Plugin.Plugin = {
           additionalProperties: false,
         },
         execute: async (input, context) => {
+          if (String(context.agent) !== leadAgent) {
+            return { content: `sidekick: only the ${leadAgent} agent can delegate to the sidekick` }
+          }
           const args = (input ?? {}) as { message?: unknown; block?: unknown; reset?: unknown }
           const message = typeof args.message === "string" ? args.message : ""
           if (!message) return { content: "sidekick: `message` is required" }
@@ -273,18 +300,20 @@ const plugin: Plugin.Plugin = {
     trace("tools:registered")
 
     /**
-     * Backstop for the permission layer. mihneaptu/opencode-fusion was archived
-     * partly because OpenCode 2 leaked a denied `edit` tool to the plan agent;
-     * this hook denies at call time whatever the config resolved to.
+     * Backstop for the lead's permission layer. A configured `deny` is final and
+     * never reaches this hook — it only runs for allow/ask decisions — so it
+     * re-checks every lead rule at call time, covering the window before the
+     * agent transform lands or a tool leaks through. It only ever tightens.
      */
     const permissions =
       enforcement === "off"
         ? undefined
         : await ctx.permission.hook("evaluate", (event) => {
-            if (event.agent !== leadAgent) return
-            if (event.action !== "edit") return
+            if (event.agent === undefined || String(event.agent) !== leadAgent) return
+            const resources = event.resources.length > 0 ? event.resources : [""]
+            if (!resources.some((resource) => decide(leadRules, event.action, resource) === "deny")) return
             event.effect = "deny"
-            event.message = DELEGATION_NUDGE
+            event.message = delegationNudge(event.action)
           })
 
     trace("permissions:ready", { enforcement })
