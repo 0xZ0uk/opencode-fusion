@@ -15,7 +15,7 @@ import type { ModelInfo } from "@opencode/client"
 import { Fusion, fusionClient, type PairStatus } from "./rpc.ts"
 import { LEAD_AGENT, SIDEKICK_AGENT, describeModelRef, toHostModel, type FusionPair, type ModelRef } from "./pair.ts"
 import { savingsReport, type SessionReader } from "./savings.ts"
-import { createModelPricing } from "./model-pricing.ts"
+import { createCosts } from "./costs.ts"
 import { createPairing, type Catalogue, type Dialogs, type WizardModel } from "./pairing.ts"
 import { sidekickSessions, type SidekickSession } from "./sidekick-state.ts"
 import { versionWarning } from "./version.ts"
@@ -105,7 +105,7 @@ const plugin: Plugin.Definition = {
       return available.length > 0 ? available : list
     }
 
-    const leadPricing = createModelPricing(catalogue)
+    const leadPricing = createCosts(catalogue)
 
     const loadPair = async (): Promise<PairStatus> => {
       try {

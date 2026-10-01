@@ -2,7 +2,7 @@ import { describe, it } from "node:test"
 import assert from "node:assert/strict"
 import type { ModelCost } from "@opencode/client"
 import { savingsReport, type SessionReader } from "../src/savings.ts"
-import { createModelPricing } from "../src/model-pricing.ts"
+import { createCosts } from "../src/costs.ts"
 import type { FusionPair } from "../src/pair.ts"
 
 const BASE: ModelCost = { input: 10, output: 20, cache: { read: 1, write: 5 } }
@@ -337,7 +337,7 @@ describe("savingsReport", () => {
   })
 
   it("prices the report through a real model-pricing resolver backed by models.dev data", async () => {
-    const resolve = createModelPricing(async () => [], async () => ({
+    const resolve = createCosts(async () => [], async () => ({
       leadco: {
         models: {
           big: {

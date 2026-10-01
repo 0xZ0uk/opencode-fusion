@@ -16,7 +16,7 @@
  */
 import type { ModelCost } from "@opencode/client"
 import { PRESETS, familyOf, resolvePreset, type PresetModel } from "./presets.ts"
-import { tierFor } from "./pricing.ts"
+import { describeRates } from "./costs.ts"
 import type { ModelRef } from "./pair.ts"
 
 /** Dialog value meaning "use the model's default effort". */
@@ -71,23 +71,6 @@ const splitKey = (value: string): PresetModel | undefined => {
   return { providerID: value.slice(0, index), modelID: value.slice(index + 1) }
 }
 
-/**
- * The model's price, for a picker row.
- *
- * `tierFor(costs, 0)` is asking for the *untiered* entry, not pricing a
- * zero-context prompt: with 0 context no context tier can apply, so
- * `tierFor` falls through to the untiered rate. The count of context tiers is
- * shown alongside so the reader knows the price moves with prompt size.
- */
-const rate = (model: WizardModel): string => {
-  const costs = model.cost ?? []
-  const tier = tierFor(costs, 0)
-  if (!tier) return "no price data"
-  const tiers = costs.filter((cost) => cost.tier?.type === "context").length
-  const cache = tier.cache ? ` · cache $${tier.cache.read}/$${tier.cache.write}` : ""
-  return `$${tier.input}/M in · $${tier.output}/M out${cache}${tiers > 0 ? ` · +${tiers} context tiers` : ""}`
-}
-
 const contextSize = (model: WizardModel): string => {
   const context = model.limit?.context
   return typeof context === "number" ? `${Math.round(context / 1000)}k ctx` : "unknown ctx"
@@ -97,7 +80,7 @@ const modelOptions = (models: readonly WizardModel[]): SelectOption[] =>
   models.map((model) => ({
     title: model.name,
     value: modelKey(model),
-    description: `${model.providerID} · ${contextSize(model)} · ${rate(model)}`,
+    description: `${model.providerID} · ${contextSize(model)} · ${describeRates(model.cost)}`,
     category: model.providerID,
   }))
 

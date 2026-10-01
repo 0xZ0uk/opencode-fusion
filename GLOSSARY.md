@@ -16,5 +16,6 @@ Terminology for this plugin, in the order the code meets it. One line each.
 - **status line** — the prompt.footer.status sentence shown on lead sessions (src/statusline.ts).
 - **enforcement** — how hard the delegation policy binds the lead: full, edits, off (src/policy.ts).
 - **lead policy** — the rules, prompt and call-time check generated from one enforcement level (src/policy.ts).
+- **cost card** — what one model costs: its rates, tiers and where the numbers came from (src/costs.ts).
 - **savings report** — /fusion-stats: what the sidekick's work cost and what it would have cost at lead rates (src/savings.ts).
 - **preset** — a subscription's named lead/sidekick model pairings offered in the wizard (src/presets.ts).

@@ -1,6 +1,15 @@
-import type { ModelCost, TokenUsageInfo } from "@opencode/client"
+import type { TokenUsageInfo } from "@opencode/client"
 import { describeModelRef, type FusionPair, type ModelRef } from "./pair.ts"
-import { EMPTY_TOKENS, addTokens, money, priceMessages, tokensOf, type Tokens } from "./pricing.ts"
+import {
+  EMPTY_TOKENS,
+  addTokens,
+  money,
+  priceMessages,
+  sourceOf,
+  tokensOf,
+  type CostCard,
+  type Tokens,
+} from "./costs.ts"
 
 export interface SessionReader {
   readonly sessionID: string
@@ -10,7 +19,7 @@ export interface SessionReader {
     sessionID: string,
     cursor?: string,
   ): Promise<{ data: readonly { type: string; tokens?: TokenUsageInfo }[]; cursor: { next?: string | null } }>
-  leadPricing(ref: ModelRef): Promise<{ costs: readonly ModelCost[]; source?: string }>
+  leadPricing(ref: ModelRef): Promise<CostCard>
 }
 
 const formatTokens = (tokens: Tokens): string =>
@@ -88,7 +97,7 @@ export async function savingsReport(pair: FusionPair | undefined, reader: Sessio
   }
   lines.push(
     "",
-    `the lead-rate figure is priced per sidekick message from ${pricing.source ?? "OpenCode catalogue"} (context tier per message, reasoning at output rate); billed figures are OpenCode's recorded session costs`,
+    `the lead-rate figure is priced per sidekick message from ${sourceOf(pricing)} (context tier per message, reasoning at output rate); billed figures are OpenCode's recorded session costs`,
   )
   return lines
 }

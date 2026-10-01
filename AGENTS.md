@@ -5,8 +5,8 @@ plugin (`src/server.ts`), a TUI plugin (`src/tui.ts` + `src/status.tsx` +
 `src/keymap.tsx`), a shared RPC contract (`src/rpc.ts`), and helper modules
 (`src/pair.ts`, `src/presets.ts`, `src/pairing.ts`, `src/statusline.ts`,
 `src/policy.ts`, `src/prompts.ts`, `src/handoffs.ts`, `src/registry.ts`,
-`src/sidekick-sessions.ts`, `src/sidekick-state.ts`, `src/pricing.ts`,
-`src/model-pricing.ts`, `src/savings.ts`, `src/version.ts`).
+`src/sidekick-sessions.ts`, `src/sidekick-state.ts`, `src/costs.ts`,
+`src/savings.ts`, `src/version.ts`).
 
 `GLOSSARY.md` names the domain terms and the module that owns each one.
 
