@@ -7,7 +7,7 @@
  */
 import type { Plugin } from "@opencode/plugin/tui"
 import { Show, createEffect, on } from "solid-js"
-import type { FusionPair } from "./pair.ts"
+import { describeModelName, type FusionPair } from "./pair.ts"
 
 export type FusionStatusState = {
   pair: FusionPair | undefined
@@ -20,9 +20,6 @@ export type FusionStatusDeps = {
   readonly state: FusionStatusState
   readonly refreshRunning: (sessionID: string) => void
 }
-
-const refText = (ref: { modelID: string; variant?: string }): string =>
-  `${ref.modelID}${ref.variant ? `#${ref.variant}` : ""}`
 
 function FusionStatus(props: {
   context: Plugin.Context
@@ -45,7 +42,7 @@ function FusionStatus(props: {
     const pair = props.state.pair
     if (!pair) return "fusion · no pair (run /fusion)"
     const running = props.sessionID && props.state.running[props.sessionID] ? " · sidekick running" : ""
-    return `fusion ${refText(pair.lead)} → ${refText(pair.sidekick)}${running}`
+    return `fusion ${describeModelName(pair.lead)} → ${describeModelName(pair.sidekick)}${running}`
   }
   return (
     <Show when={leadSession()}>

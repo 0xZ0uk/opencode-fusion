@@ -11,7 +11,16 @@ import type { Plugin } from "@opencode/plugin"
 import type { Agent } from "@opencode/plugin"
 import type { AgentInfo } from "@opencode/client"
 import { appendFileSync } from "node:fs"
-import { LEAD_AGENT, SIDEKICK_AGENT, describeModelRef, normalizePair, type FusionPair, type ModelRef } from "./pair.ts"
+import {
+  LEAD_AGENT,
+  SIDEKICK_AGENT,
+  describeModelRef,
+  normalizePair,
+  sameModel,
+  toHostModel,
+  type FusionPair,
+  type ModelRef,
+} from "./pair.ts"
 import { SIDEKICK_SYSTEM } from "./prompts.ts"
 import { DEFAULT_SHELL_ALLOWLIST, leadPolicy, sidekickRules, type Enforcement } from "./policy.ts"
 import { versionWarning } from "./version.ts"
@@ -21,8 +30,15 @@ import { createRegistry, type SidekickStorage } from "./registry.ts"
 
 const PAIR_KEY = "pair"
 
-type AgentModel = NonNullable<Agent.Info["model"]>
 type StoredJson = Parameters<Plugin.Context["storage"]["set"]>[1]
+
+/**
+ * The one place the host's branded model type meets the pair's structural one:
+ * `pair.ts` owns the conversion, the agent transform needs the host's brand.
+ * Same single-boundary cast pattern as `toStored`.
+ */
+type AgentModel = NonNullable<Agent.Info["model"]>
+const asAgentModel = (ref: ModelRef): AgentModel => toHostModel(ref) as AgentModel
 
 type Options = {
   readonly enforce?: Enforcement
@@ -93,9 +109,6 @@ const plugin: Plugin.Plugin = {
     }
     const registry = await createRegistry(storage)
 
-    const toAgentModel = (ref: ModelRef): AgentModel =>
-      ({ id: ref.modelID, providerID: ref.providerID, ...(ref.variant ? { variant: ref.variant } : {}) }) as AgentModel
-
     // One transform reading the captured `pair`: the documented way to change a
     // registration later is to mutate the closure and call reload(). It replays
     // on every reload, so it stays cheap and idempotent.
@@ -103,13 +116,13 @@ const plugin: Plugin.Plugin = {
     const agents = await ctx.agent.transform((editor) => {
       trace("transform:visible", editor.list().map((agent) => String(agent.id)))
       editor.update(leadAgent, (lead) => {
-        if (pair) lead.model = toAgentModel(pair.lead)
+        if (pair) lead.model = asAgentModel(pair.lead)
         lead.system = policy.system
         lead.permissions = [...lead.permissions, ...policy.rules]
         sawAgents = true
       })
       editor.update(sidekickAgent, (sidekick) => {
-        if (pair) sidekick.model = toAgentModel(pair.sidekick)
+        if (pair) sidekick.model = asAgentModel(pair.sidekick)
         sidekick.system = SIDEKICK_SYSTEM
         sidekick.mode = "subagent"
         sidekick.permissions = [...sidekick.permissions, ...sidekickRules(sidekickAutoApprove)]
@@ -139,9 +152,11 @@ const plugin: Plugin.Plugin = {
         const listed = await ctx.agent.list()
         const agents: AgentInfo[] = listed.data ?? []
         trace("agents:listed", agents.map((agent) => `${agent.id}=${agent.model?.id ?? "none"}`))
+        // Registered but not on the pair's model counts as drift; not registered
+        // at all does not, or this would reload forever on a missing agent.
         const stale = (id: string, ref: ModelRef) => {
           const found = agents.find((agent) => agent.id === id)
-          return Boolean(found) && found?.model?.id !== ref.modelID
+          return Boolean(found) && !sameModel(ref, found?.model)
         }
         if (stale(leadAgent, pair.lead) || stale(sidekickAgent, pair.sidekick)) {
           trace("agents:reapply", { attempt: attempts })
@@ -163,15 +178,9 @@ const plugin: Plugin.Plugin = {
         try {
           const session = await ctx.session.get({ sessionID: existing })
           if (!session.time.archived) {
-            const current = session.model
-            if (
-              pair &&
-              (current?.id !== pair.sidekick.modelID ||
-                current?.providerID !== pair.sidekick.providerID ||
-                current?.variant !== pair.sidekick.variant)
-            ) {
-              // A re-pair leaves the stored session on the old model; re-sync it.
-              await ctx.session.switchModel({ sessionID: existing, model: toAgentModel(pair.sidekick) })
+            // A re-pair leaves the stored session on the old model; re-sync it.
+            if (pair && !sameModel(pair.sidekick, session.model)) {
+              await ctx.session.switchModel({ sessionID: existing, model: toHostModel(pair.sidekick) })
             }
             return existing
           }
@@ -182,7 +191,7 @@ const plugin: Plugin.Plugin = {
       }
       const created = await ctx.session.create({
         agent: sidekickAgent,
-        ...(pair ? { model: toAgentModel(pair.sidekick) } : {}),
+        ...(pair ? { model: toHostModel(pair.sidekick) } : {}),
         title: pair ? `Fusion sidekick · ${pair.sidekick.modelID}` : "Fusion sidekick",
         metadata: { fusionLeadSession: leadSessionID },
       })

@@ -13,7 +13,7 @@
 import type { Plugin } from "@opencode/plugin/tui"
 import type { ModelInfo } from "@opencode/client"
 import { Fusion } from "./rpc.ts"
-import { LEAD_AGENT, SIDEKICK_AGENT, describeModelRef, type FusionPair, type ModelRef } from "./pair.ts"
+import { LEAD_AGENT, SIDEKICK_AGENT, describeModelRef, toHostModel, type FusionPair, type ModelRef } from "./pair.ts"
 import { EMPTY_TOKENS, addTokens, money, priceMessages, tierFor, tokensOf, type Tokens } from "./pricing.ts"
 import { PRESETS, familyOf, resolvePreset } from "./presets.ts"
 import { versionWarning } from "./version.ts"
@@ -259,11 +259,7 @@ const plugin: Plugin.Definition = {
         try {
           await context.client.session.switchModel({
             sessionID: route.sessionID,
-            model: {
-              id: next.lead.modelID,
-              providerID: next.lead.providerID,
-              ...(next.lead.variant ? { variant: next.lead.variant } : {}),
-            },
+            model: toHostModel(next.lead),
           })
         } catch (error) {
           console.warn(`[fusion] could not switch the live session model: ${String(error)}`)
