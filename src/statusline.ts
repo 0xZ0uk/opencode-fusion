@@ -26,5 +26,5 @@ export function statusText(state: StatusLineState, sessionID: string | undefined
   const pair = state.pair
   if (!pair) return "fusion · no pair (run /fusion)"
   const suffix = sessionID !== undefined && running ? " · sidekick running" : ""
-  return `fusion ${describeModelName(pair.lead)} → ${describeModelName(pair.sidekick)}${suffix}`
+  return `fusion ${describeModelName(pair.lead)} ◆ ${describeModelName(pair.sidekick)}${suffix}`
 }
