@@ -22,6 +22,29 @@ export interface SessionReader {
   leadPricing(ref: ModelRef): Promise<CostCard>
 }
 
+export interface SavingsSnapshot {
+  readonly lead: { readonly model: string; readonly tokens: Tokens; readonly cost: number }
+  readonly sidekick: {
+    readonly model: string
+    readonly tokens: Tokens
+    readonly cost: number
+    readonly sessions: number
+  }
+  readonly skipped: number
+  readonly totalBilled: number
+  readonly atLeadRates?: number
+  readonly estimatedSaving?: number
+  readonly pricingSource: string
+}
+
+export const skippedNote = (skipped: number): string =>
+  `${skipped} unavailable sidekick session${skipped === 1 ? "" : "s"} omitted; totals cover readable sessions only`
+
+export const missingPricingNote = "no price data for the lead model — cannot estimate the saving"
+
+export const provenanceNote = (source: string): string =>
+  `the lead-rate figure is priced per sidekick message from ${source} (context tier per message, reasoning at output rate); billed figures are OpenCode's recorded session costs`
+
 const formatTokens = (tokens: Tokens): string =>
   `${tokens.input.toLocaleString()} in · ${tokens.output.toLocaleString()} out · ${tokens.reasoning.toLocaleString()} reasoning`
 
@@ -43,8 +66,11 @@ async function collectMessages(reader: SessionReader, sessionID: string): Promis
   return perMessage
 }
 
-export async function savingsReport(pair: FusionPair | undefined, reader: SessionReader): Promise<string[]> {
-  if (!pair) return ["no pair picked yet — run /fusion"]
+export async function collectSavings(
+  pair: FusionPair | undefined,
+  reader: SessionReader,
+): Promise<SavingsSnapshot | undefined> {
+  if (!pair) return undefined
 
   const [sidekickIDs, leadSession, pricing] = await Promise.all([
     reader.sidekickSessions(),
@@ -73,31 +99,45 @@ export async function savingsReport(pair: FusionPair | undefined, reader: Sessio
     }
   }
 
-  const costs = pricing.costs
-  const lines = [
-    `lead     ${describeModelRef(pair.lead)}`,
-    `         ${formatTokens(tokensOf(leadSession.tokens))} · billed ${money(leadSession.cost)}`,
-    `sidekick ${describeModelRef(pair.sidekick)} · ${sessions} session${sessions === 1 ? "" : "s"}`,
-    `         ${formatTokens(sidekickTokens)} · billed ${money(sidekickCost)}`,
-  ]
-  if (skipped > 0) {
-    lines.push(
-      `${skipped} unavailable sidekick session${skipped === 1 ? "" : "s"} omitted; totals cover readable sessions only`,
-    )
+  const atLeadRates = pricing.costs.length > 0 ? priceMessages(perMessage, pricing.costs) : undefined
+  return {
+    lead: { model: describeModelRef(pair.lead), tokens: tokensOf(leadSession.tokens), cost: leadSession.cost },
+    sidekick: {
+      model: describeModelRef(pair.sidekick),
+      tokens: sidekickTokens,
+      cost: sidekickCost,
+      sessions,
+    },
+    skipped,
+    totalBilled: leadSession.cost + sidekickCost,
+    atLeadRates,
+    estimatedSaving: atLeadRates === undefined ? undefined : Math.max(atLeadRates - sidekickCost, 0),
+    pricingSource: sourceOf(pricing),
   }
-  lines.push("", `total billed: ${money(leadSession.cost + sidekickCost)}`)
-  if (costs.length > 0) {
-    const atLeadRates = priceMessages(perMessage, costs)
+}
+
+export async function savingsReport(pair: FusionPair | undefined, reader: SessionReader): Promise<string[]> {
+  const snapshot = await collectSavings(pair, reader)
+  if (!snapshot) return ["no pair picked yet — run /fusion"]
+
+  const lines = [
+    `lead     ${snapshot.lead.model}`,
+    `         ${formatTokens(snapshot.lead.tokens)} · billed ${money(snapshot.lead.cost)}`,
+    `sidekick ${snapshot.sidekick.model} · ${snapshot.sidekick.sessions} session${snapshot.sidekick.sessions === 1 ? "" : "s"}`,
+    `         ${formatTokens(snapshot.sidekick.tokens)} · billed ${money(snapshot.sidekick.cost)}`,
+  ]
+  if (snapshot.skipped > 0) {
+    lines.push(skippedNote(snapshot.skipped))
+  }
+  lines.push("", `total billed: ${money(snapshot.totalBilled)}`)
+  if (snapshot.atLeadRates !== undefined) {
     lines.push(
-      `same sidekick work at lead rates: ${money(atLeadRates)}`,
-      `estimated saving: ${money(Math.max(atLeadRates - sidekickCost, 0))}`,
+      `same sidekick work at lead rates: ${money(snapshot.atLeadRates)}`,
+      `estimated saving: ${money(snapshot.estimatedSaving ?? 0)}`,
     )
   } else {
-    lines.push("no price data for the lead model — cannot estimate the saving")
+    lines.push(missingPricingNote)
   }
-  lines.push(
-    "",
-    `the lead-rate figure is priced per sidekick message from ${sourceOf(pricing)} (context tier per message, reasoning at output rate); billed figures are OpenCode's recorded session costs`,
-  )
+  lines.push("", provenanceNote(snapshot.pricingSource))
   return lines
 }

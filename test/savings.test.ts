@@ -1,7 +1,7 @@
 import { describe, it } from "node:test"
 import assert from "node:assert/strict"
 import type { ModelCost } from "@opencode/client"
-import { savingsReport, type SessionReader } from "../src/savings.ts"
+import { collectSavings, savingsReport, type SessionReader } from "../src/savings.ts"
 import { createCosts } from "../src/costs.ts"
 import type { FusionPair } from "../src/pair.ts"
 
@@ -364,5 +364,81 @@ describe("savingsReport", () => {
     assert.match(report, /same sidekick work at lead rates: \$2\.1250/)
     assert.match(report, /estimated saving: \$1\.1250/)
     assert.match(report, /models\.dev/)
+  })
+})
+
+describe("collectSavings", () => {
+  const fullFixture = () =>
+    makeReader({
+      sidekicks: ["s1", "s2"],
+      sessions: {
+        "lead-1": { cost: 2, tokens: usage(10, 20, 30) },
+        s1: { cost: 1, tokens: usage(170_000, 15_000, 10_000, 80_000, 20_000) },
+        s2: { cost: 2, tokens: usage(600_000) },
+      },
+      pages: {
+        s1: [
+          { data: [msg(usage(50_000, 10_000, 5_000)), msg(usage(999_999), "user")], next: "p2" },
+          { data: [msg(usage(120_000, 5_000, 5_000, 80_000, 20_000))], next: null },
+        ],
+        s2: [{ data: [msg(usage(600_000))] }],
+      },
+      pricing: { costs: COSTS, source: "OpenCode catalogue" },
+    })
+
+  it("returns undefined for a missing pair without touching the reader", async () => {
+    const { reader, calls } = makeReader({})
+    assert.equal(await collectSavings(undefined, reader), undefined)
+    assert.equal(calls.getSession.length, 0)
+    assert.equal(calls.sidekicks, 0)
+    assert.equal(calls.pages.length, 0)
+    assert.equal(calls.pricing, 0)
+  })
+
+  it("collects the full snapshot behind the report", async () => {
+    const { reader } = fullFixture()
+    const snapshot = await collectSavings(PAIR, reader)
+    assert.equal(snapshot?.lead.model, "leadco/big#high")
+    assert.deepEqual(
+      { input: snapshot?.lead.tokens.input, output: snapshot?.lead.tokens.output, reasoning: snapshot?.lead.tokens.reasoning },
+      { input: 10, output: 20, reasoning: 30 },
+    )
+    assert.equal(snapshot?.lead.cost, 2)
+    assert.equal(snapshot?.sidekick.model, "cheap/small")
+    assert.deepEqual(
+      {
+        input: snapshot?.sidekick.tokens.input,
+        output: snapshot?.sidekick.tokens.output,
+        reasoning: snapshot?.sidekick.tokens.reasoning,
+      },
+      { input: 770_000, output: 15_000, reasoning: 10_000 },
+    )
+    assert.equal(snapshot?.sidekick.cost, 3)
+    assert.equal(snapshot?.sidekick.sessions, 2)
+    assert.equal(snapshot?.skipped, 0)
+    assert.equal(snapshot?.totalBilled, 5)
+    assert.equal(snapshot?.atLeadRates, 21.96)
+    assert.equal(snapshot?.estimatedSaving, 18.96)
+    assert.equal(snapshot?.pricingSource, "OpenCode catalogue")
+  })
+
+  it("leaves the lead-rate fields undefined when the lead has no price data", async () => {
+    const { reader } = makeReader({
+      sidekicks: ["s1"],
+      sessions: { "lead-1": { cost: 2, tokens: usage(10) }, s1: { cost: 1, tokens: usage(1_000) } },
+      pages: { s1: [{ data: [msg(usage(1_000))] }] },
+      pricing: { costs: [] },
+    })
+    const snapshot = await collectSavings(PAIR, reader)
+    assert.equal(snapshot?.atLeadRates, undefined)
+    assert.equal(snapshot?.estimatedSaving, undefined)
+  })
+
+  it("collects exactly once when the report formats it", async () => {
+    const { reader, calls } = fullFixture()
+    await savingsReport(PAIR, reader)
+    assert.equal(calls.sidekicks, 1)
+    assert.equal(calls.pricing, 1)
+    assert.deepEqual(calls.getSession, ["lead-1", "s1", "s2"])
   })
 })

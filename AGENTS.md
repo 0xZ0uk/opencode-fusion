@@ -2,11 +2,12 @@
 
 Devin-Fusion-style lead + sidekick model pairing for OpenCode V2: a server
 plugin (`src/server.ts`), a TUI plugin (`src/tui.ts` + `src/status.tsx` +
-`src/keymap.tsx`), a shared RPC contract (`src/rpc.ts`), and helper modules
+`src/keymap.tsx` + `src/savings-dialog.tsx`), a shared RPC contract
+(`src/rpc.ts`), and helper modules
 (`src/pair.ts`, `src/presets.ts`, `src/pairing.ts`, `src/statusline.ts`,
 `src/policy.ts`, `src/prompts.ts`, `src/handoffs.ts`, `src/registry.ts`,
 `src/sidekick-sessions.ts`, `src/sidekick-state.ts`, `src/costs.ts`,
-`src/savings.ts`, `src/version.ts`).
+`src/savings.ts`, `src/savings-table.ts`, `src/version.ts`).
 
 `GLOSSARY.md` names the domain terms and the module that owns each one.
 
@@ -26,10 +27,12 @@ bundler, no JSX transform. Consequences:
 - Everything testable must live in JSX-free modules that only use
   `import type` from `@opencode/*` (type imports are erased, so the modules
   load without the host's runtime).
-- `src/status.tsx` and `src/keymap.tsx` are the only JSX files; neither is
-  imported by tests. Keep logic out of them — anything worth testing belongs in
-  a `.ts` module. Both now hold wiring only: the status sentence's predicate and
-  text live in `src/statusline.ts`, the `/fusion` walk in `src/pairing.ts`.
+- `src/status.tsx`, `src/keymap.tsx` and `src/savings-dialog.tsx` are the only
+  JSX files; none is imported by tests. Keep logic out of them — anything worth
+  testing belongs in a `.ts` module. All three hold wiring only: the status
+  sentence's predicate and text live in `src/statusline.ts`, the `/fusion` walk
+  in `src/pairing.ts`, and the savings dialog's rows/notes in
+  `src/savings-table.ts` fed by `collectSavings` in `src/savings.ts`.
 - `src/sidekick-state.ts` takes structural session types and imports nothing, so
   the TUI can hand it the host's own `SessionInfo[]` with no adapter type.
 - Test files import sources with explicit `.ts` extensions

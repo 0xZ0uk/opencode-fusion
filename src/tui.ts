@@ -15,7 +15,9 @@ import type { ModelInfo } from "@opencode/client"
 import { Effect } from "effect"
 import { Fusion, fusionClient, type PairStatus } from "./rpc.ts"
 import { LEAD_AGENT, SIDEKICK_AGENT, describeModelRef, toHostModel, type FusionPair, type ModelRef } from "./pair.ts"
-import { savingsReport, type SessionReader } from "./savings.ts"
+import { collectSavings, type SessionReader } from "./savings.ts"
+import { savingsTable } from "./savings-table.ts"
+import { showSavingsDialog } from "./savings-dialog.tsx"
 import { createCosts } from "./costs.ts"
 import { createPairing, type Catalogue, type Dialogs, type WizardModel } from "./pairing.ts"
 import { sidekickSessions, type SidekickSession } from "./sidekick-state.ts"
@@ -224,7 +226,7 @@ const plugin: Plugin.Definition = {
         }
         const sessionID = route.sessionID
         const status = yield* loadPair
-        const lines = yield* fromPromise(() => {
+        const snapshot = yield* fromPromise(() => {
           const reader: SessionReader = {
             sessionID,
             getSession: (id) =>
@@ -237,9 +239,13 @@ const plugin: Plugin.Definition = {
               ),
             leadPricing,
           }
-          return savingsReport(status.pair, reader)
+          return collectSavings(status.pair, reader)
         })
-        yield* fromPromise(() => context.ui.dialog.alert({ title: "Fusion savings", message: lines.join("\n") }))
+        if (!snapshot) {
+          yield* fail("no pair picked yet — run /fusion")
+          return
+        }
+        yield* fromPromise(() => showSavingsDialog(context, savingsTable(snapshot)))
       }).pipe(
         Effect.catch((error) =>
           fromPromise(() => context.ui.dialog.alert({ title: "Fusion savings", message: `unavailable: ${String(error)}` })),
