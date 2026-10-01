@@ -2,9 +2,10 @@ import { describe, it } from "node:test"
 import assert from "node:assert/strict"
 import { createRegistry, type SidekickStorage } from "../src/registry.ts"
 
-// The registry owns these keys; the tests only need them to seed the fake.
+// The registry owns this key; the tests only need it to seed the fake.
 const CHILDREN = "sidekick-sessions"
-const HISTORY = "sidekick-history"
+/** An install from an older version may still carry this key; it is now orphaned. */
+const LEGACY_HISTORY = "sidekick-history"
 
 /** Storage seam fake: values are applied synchronously, reads are async. */
 function memoryStorage(initial: Record<string, unknown> = {}) {
@@ -65,68 +66,55 @@ async function releaseAll(pending: GatedWrite[]): Promise<void> {
 
 describe("load", () => {
   it("normalizes a junk persisted blob through the interface", async () => {
-    const { storage } = memoryStorage({
-      [CHILDREN]: { a: "s1", b: 7, c: null },
-      [HISTORY]: {
-        a: ["s1", "s2"],
-        b: "not-an-array",
-        c: [1, "s3", null],
-        d: [],
-        e: 42,
-      },
-    })
+    const { storage } = memoryStorage({ [CHILDREN]: { a: "s1", b: 7, c: null } })
     const registry = await createRegistry(storage)
 
     assert.equal(registry.current("a"), "s1")
-    assert.deepEqual(registry.sessions("a"), ["s1", "s2"])
-    // Non-string child entries and non-array / empty / non-string lists drop.
+    // Non-string child entries drop.
     assert.equal(registry.current("b"), undefined)
-    assert.deepEqual(registry.sessions("b"), [])
-    assert.deepEqual(registry.sessions("c"), ["s3"])
-    assert.deepEqual(registry.sessions("d"), [])
-    assert.deepEqual(registry.sessions("e"), [])
+    assert.equal(registry.current("c"), undefined)
   })
 
   it("treats non-object or missing blobs as empty", async () => {
     for (const junk of [undefined, "junk", null, 42]) {
-      const { storage } = memoryStorage({ [CHILDREN]: junk, [HISTORY]: junk })
+      const { storage } = memoryStorage({ [CHILDREN]: junk })
       const registry = await createRegistry(storage)
       assert.equal(registry.current("x"), undefined)
-      assert.deepEqual(registry.sessions("x"), [])
     }
   })
 
-  it("seeds each loaded current child into its history", async () => {
-    const { storage } = memoryStorage({
-      [CHILDREN]: { lead: "sk-live", lone: "sk-only", dup: "sk-old" },
-      [HISTORY]: { lead: ["sk-old"], dup: ["sk-old", "sk-new"] },
+  it("never reads the orphaned history key an older install may still carry", async () => {
+    const { storage, store } = memoryStorage({
+      [CHILDREN]: { lead: "sk-live" },
+      [LEGACY_HISTORY]: { lead: ["sk-old"], other: ["sk-1", "sk-2"] },
     })
     const registry = await createRegistry(storage)
 
-    assert.deepEqual(registry.sessions("lead"), ["sk-old", "sk-live"])
-    assert.deepEqual(registry.sessions("lone"), ["sk-only"])
-    // Already present: the seed does not duplicate it.
-    assert.deepEqual(registry.sessions("dup"), ["sk-old", "sk-new"])
+    assert.equal(registry.current("lead"), "sk-live")
+    // The old session ids are not reachable through the registry any more.
+    assert.equal(registry.current("other"), undefined)
+
+    await registry.record("lead", "sk-new")
+    assert.deepEqual(store.get(CHILDREN), { lead: "sk-new" })
+    // Untouched, and never written back.
+    assert.deepEqual(store.get(LEGACY_HISTORY), { lead: ["sk-old"], other: ["sk-1", "sk-2"] })
   })
 })
 
 describe("record", () => {
-  it("sets the current child and appends to history only when absent", async () => {
+  it("sets the current child, last write wins", async () => {
     const { storage } = memoryStorage()
     const registry = await createRegistry(storage)
 
     await registry.record("lead", "sk1")
     assert.equal(registry.current("lead"), "sk1")
-    assert.deepEqual(registry.sessions("lead"), ["sk1"])
 
     await registry.record("lead", "sk2")
     assert.equal(registry.current("lead"), "sk2")
-    assert.deepEqual(registry.sessions("lead"), ["sk1", "sk2"])
 
-    // Re-recording sk1 moves it current but does not append it again.
+    // Re-recording an older id makes it current again.
     await registry.record("lead", "sk1")
     assert.equal(registry.current("lead"), "sk1")
-    assert.deepEqual(registry.sessions("lead"), ["sk1", "sk2"])
   })
 
   it("mutates in memory synchronously and resolves only once the write lands", async () => {
@@ -160,7 +148,7 @@ describe("record", () => {
     for (let i = 0; i < 200; i += 1) writes.push(registry.record(`lead-${i}`, `sk-${i}`))
     // Touch lead-0: it moves to the newest end of the LRU.
     writes.push(registry.record("lead-0", "sk-0b"))
-    // Overflow by one; the maps prune synchronously, so the oldest is now lead-1.
+    // Overflow by one; the map prunes synchronously, so the oldest is now lead-1.
     writes.push(registry.record("lead-200", "sk-200"))
 
     assert.equal(registry.current("lead-0"), "sk-0b")
@@ -168,7 +156,7 @@ describe("record", () => {
     await Promise.all(writes)
   })
 
-  it("prunes both maps to the cap from the oldest end on persist", async () => {
+  it("prunes the map to the cap from the oldest end on persist", async () => {
     const { storage, store } = memoryStorage()
     const registry = await createRegistry(storage)
 
@@ -178,46 +166,31 @@ describe("record", () => {
     // Pruning happens in memory even though the writes are queued.
     assert.equal(registry.current("lead-0"), undefined)
     assert.equal(registry.current("lead-1"), "sk-1")
-    assert.deepEqual(registry.sessions("lead-0"), [])
-    assert.deepEqual(registry.sessions("lead-1"), ["sk-1"])
 
     await Promise.all(writes)
     const children = store.get(CHILDREN) as Record<string, string>
-    const history = store.get(HISTORY) as Record<string, string[]>
     assert.equal(Object.keys(children).length, 200)
-    assert.equal(Object.keys(history).length, 200)
     assert.equal(children["lead-0"], undefined)
-    assert.equal(history["lead-0"], undefined)
+    assert.equal(children["lead-200"], "sk-200")
   })
 })
 
 describe("reset", () => {
-  it("drops the current child but keeps history reachable", async () => {
+  it("drops the current child", async () => {
     const { storage } = memoryStorage()
     const registry = await createRegistry(storage)
 
     await registry.record("lead", "sk1")
-    await registry.record("lead", "sk2")
     await registry.reset("lead")
 
     assert.equal(registry.current("lead"), undefined)
-    assert.deepEqual(registry.sessions("lead"), ["sk1", "sk2"])
   })
 })
 
 describe("forget", () => {
-  it("removes the session id everywhere and reports whether anything changed", async () => {
+  it("removes the session id as a child value and as a lead key", async () => {
     const { storage } = memoryStorage({
       [CHILDREN]: { lead1: "sk1", sk1: "childX", lead2: "sk2" },
-      [HISTORY]: {
-        lead1: ["sk0", "sk1"],
-        sk1: ["a", "b"],
-        lead3: ["sk1"],
-        lead4: ["sk1", "skX"],
-        lead2: ["sk2"],
-        // Duplicate entries (possible in a hand-edited persisted blob) all go.
-        lead5: ["sk1", "sk1", "skX"],
-      },
     })
     const registry = await createRegistry(storage)
 
@@ -225,49 +198,20 @@ describe("forget", () => {
     // As a child value and as a lead key.
     assert.equal(registry.current("lead1"), undefined)
     assert.equal(registry.current("sk1"), undefined)
-    // Pruned from history lists; the emptied list is dropped.
-    assert.deepEqual(registry.sessions("lead1"), ["sk0"])
-    assert.deepEqual(registry.sessions("lead3"), [])
-    assert.deepEqual(registry.sessions("lead4"), ["skX"])
-    assert.deepEqual(registry.sessions("lead2"), ["sk2"])
-    assert.deepEqual(registry.sessions("lead5"), ["skX"])
+    // Untouched leads keep their mapping.
+    assert.equal(registry.current("lead2"), "sk2")
 
     assert.equal(await registry.forget("sk1"), false)
     assert.equal(await registry.forget("missing"), false)
   })
 
-  it("persists the pruned maps", async () => {
-    const { storage, store } = memoryStorage({
-      [CHILDREN]: { lead1: "sk1" },
-      [HISTORY]: { lead1: ["sk0", "sk1"] },
-    })
+  it("persists the pruned map", async () => {
+    const { storage, store } = memoryStorage({ [CHILDREN]: { lead1: "sk1" } })
     const registry = await createRegistry(storage)
 
     assert.equal(await registry.forget("sk1"), true)
 
     assert.deepEqual(store.get(CHILDREN), {})
-    assert.deepEqual(store.get(HISTORY), { lead1: ["sk0"] })
-  })
-})
-
-describe("sessions", () => {
-  it("merges history with the current child, history first", async () => {
-    const { storage } = memoryStorage({
-      [CHILDREN]: { lead: "sk-live" },
-      [HISTORY]: { lead: ["sk-old"] },
-    })
-    const registry = await createRegistry(storage)
-
-    assert.deepEqual(registry.sessions("lead"), ["sk-old", "sk-live"])
-    assert.deepEqual(registry.sessions("unknown"), [])
-  })
-
-  it("returns history alone when there is no current child", async () => {
-    const { storage } = memoryStorage({ [HISTORY]: { lead: ["sk-old", "sk-new"] } })
-    const registry = await createRegistry(storage)
-
-    assert.equal(registry.current("lead"), undefined)
-    assert.deepEqual(registry.sessions("lead"), ["sk-old", "sk-new"])
   })
 })
 
@@ -281,23 +225,19 @@ describe("persistence", () => {
 
     const reloaded = await createRegistry(storage)
     assert.equal(reloaded.current("lead"), "sk2")
-    assert.deepEqual(reloaded.sessions("lead"), ["sk1", "sk2"])
-    assert.deepEqual(reloaded.sessions("lone"), ["sk3"])
+    assert.equal(reloaded.current("lone"), "sk3")
   })
 
-  it("persists a reset: the child drops, history keeps the session", async () => {
+  it("persists a reset: the child drops", async () => {
     const { storage, store } = memoryStorage()
     const registry = await createRegistry(storage)
     await registry.record("lead", "sk1")
-    await registry.record("lead", "sk2")
     await registry.reset("lead")
 
     assert.deepEqual(store.get(CHILDREN), {})
-    assert.deepEqual(store.get(HISTORY), { lead: ["sk1", "sk2"] })
 
     const reloaded = await createRegistry(storage)
     assert.equal(reloaded.current("lead"), undefined)
-    assert.deepEqual(reloaded.sessions("lead"), ["sk1", "sk2"])
   })
 
   it("skips the write when there is nothing to change", async () => {
@@ -308,7 +248,6 @@ describe("persistence", () => {
     await settle()
 
     assert.equal(store.get(CHILDREN), undefined)
-    assert.equal(store.get(HISTORY), undefined)
   })
 })
 
@@ -328,7 +267,6 @@ describe("write ordering", () => {
     await Promise.all([first, second])
 
     assert.deepEqual(store.get(CHILDREN), { lead: "sk2" })
-    assert.deepEqual(store.get(HISTORY), { lead: ["sk1", "sk2"] })
   })
 
   it("keeps the queue moving after a failed write", async () => {
@@ -350,6 +288,5 @@ describe("write ordering", () => {
 
     // The failure left no snapshot behind; the queued write lands the newest state.
     assert.deepEqual(store.get(CHILDREN), { lead: "sk2" })
-    assert.deepEqual(store.get(HISTORY), { lead: ["sk1", "sk2"] })
   })
 })

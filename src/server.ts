@@ -24,9 +24,10 @@ import {
 import { SIDEKICK_SYSTEM } from "./prompts.ts"
 import { DEFAULT_SHELL_ALLOWLIST, leadPolicy, sidekickRules, type Enforcement } from "./policy.ts"
 import { versionWarning } from "./version.ts"
-import { Fusion, type PairStatus, type SidekicksInput } from "./rpc.ts"
+import { Fusion, type PairStatus } from "./rpc.ts"
 import { createHandoffs, type SidekickHost, type SidekickSessions } from "./handoffs.ts"
 import { createRegistry, type SidekickStorage } from "./registry.ts"
+import { createSidekickSessions, type SessionHost } from "./sidekick-sessions.ts"
 
 const PAIR_KEY = "pair"
 
@@ -169,42 +170,11 @@ const plugin: Plugin.Plugin = {
       }
     }
 
-    const ensureSidekickSession = async (leadSessionID: string): Promise<string> => {
-      const existing = registry.current(leadSessionID)
-      if (existing) {
-        // LRU touch: recording an existing child moves it to the newest end.
-        // Await the write so the touch is durable before the session is reused.
-        await registry.record(leadSessionID, existing)
-        try {
-          const session = await ctx.session.get({ sessionID: existing })
-          if (!session.time.archived) {
-            // A re-pair leaves the stored session on the old model; re-sync it.
-            if (pair && !sameModel(pair.sidekick, session.model)) {
-              await ctx.session.switchModel({ sessionID: existing, model: toHostModel(pair.sidekick) })
-            }
-            return existing
-          }
-        } catch {
-          /* the stored session is gone */
-        }
-        await registry.reset(leadSessionID)
-      }
-      const created = await ctx.session.create({
-        agent: sidekickAgent,
-        ...(pair ? { model: toHostModel(pair.sidekick) } : {}),
-        title: pair ? `Fusion sidekick · ${pair.sidekick.modelID}` : "Fusion sidekick",
-        metadata: { fusionLeadSession: leadSessionID },
-      })
-      const id = String(created.id)
-      // Await the write: the handoff may start as soon as this returns.
-      await registry.record(leadSessionID, id)
-      return id
-    }
-
-    // Seams the Handoff lifecycle module is built on: the host calls go to
-    // `ctx`, session bookkeeping to the registry, which sits behind this
-    // interface.
-    const host: SidekickHost = {
+    // The one place the host's session API meets the plugin's two seams: the
+    // handoff lifecycle drives a sidekick turn, the sidekick sessions module
+    // decides which session that turn lands in. Both read `pair` late, through
+    // the getter below, because `setPair` replaces it after setup.
+    const host: SidekickHost & SessionHost = {
       prompt: (input) => ctx.session.prompt({ sessionID: input.sessionID, text: input.text, metadata: input.metadata }),
       wait: (sessionID, waitOptions) => ctx.session.wait({ sessionID }, { signal: waitOptions?.signal }),
       context: (sessionID) => ctx.session.context({ sessionID }),
@@ -213,13 +183,24 @@ const plugin: Plugin.Plugin = {
         await ctx.session.synthetic({ sessionID: input.sessionID, text: input.text, resume: input.resume })
       },
       workingDiff: async () => (await ctx.vcs.diff({ mode: "working" })).data,
+      get: async (sessionID) => {
+        const session = await ctx.session.get({ sessionID })
+        return { archived: Boolean(session.time.archived), model: session.model }
+      },
+      create: async (input) => ({ id: String((await ctx.session.create(input)).id) }),
+      switchModel: async (input) => {
+        await ctx.session.switchModel({ sessionID: input.sessionID, model: input.model as AgentModel })
+      },
     }
 
-    const sessions: SidekickSessions = {
-      ensure: (leadSessionID) => ensureSidekickSession(leadSessionID),
-      current: (leadSessionID) => registry.current(leadSessionID),
-      forget: (leadSessionID) => registry.reset(leadSessionID),
-    }
+    // The reuse policy lives in its own module, behind the same
+    // `SidekickSessions` interface the handoff lifecycle depends on.
+    const sessions: SidekickSessions = createSidekickSessions({
+      host,
+      registry,
+      sidekickAgent,
+      currentPair: () => pair,
+    })
 
     const handoffs = createHandoffs({ host, sessions, blockTimeoutSeconds })
 
@@ -328,18 +309,6 @@ const plugin: Plugin.Plugin = {
         await ctx.agent.reload()
         return { applied: true }
       },
-      sidekicks: async (input) => {
-        // The schema declares this input; `Rpc.Input` of a JSON Schema is `unknown`.
-        const sessionID = String((input as SidekicksInput).sessionID)
-        return {
-          current: registry.current(sessionID),
-          sessionIDs: registry.sessions(sessionID),
-          running: handoffs.running(sessionID),
-        }
-      },
-    })
-    handoffs.setEmitter((event) => {
-      void rpc.events.emit("handoffChanged", event).catch(() => {})
     })
 
     // Late pass for the cold-start ordering problem above: config agents are

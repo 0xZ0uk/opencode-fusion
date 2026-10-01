@@ -86,24 +86,6 @@ export const Fusion = {
         additionalProperties: false,
       },
     },
-    sidekicks: {
-      input: {
-        type: "object",
-        properties: { sessionID: { type: "string" } },
-        required: ["sessionID"],
-        additionalProperties: false,
-      },
-      output: {
-        type: "object",
-        properties: {
-          current: { type: "string" },
-          sessionIDs: { type: "array", items: { type: "string" } },
-          running: { type: "boolean" },
-        },
-        required: ["sessionIDs", "running"],
-        additionalProperties: false,
-      },
-    },
   },
   events: {
     pairChanged: {
@@ -114,18 +96,6 @@ export const Fusion = {
           sidekick: modelRef,
         },
         required: ["lead", "sidekick"],
-        additionalProperties: false,
-      },
-    },
-    handoffChanged: {
-      schema: {
-        type: "object",
-        properties: {
-          leadSessionID: { type: "string" },
-          sidekickSessionID: { type: "string" },
-          running: { type: "boolean" },
-        },
-        required: ["leadSessionID", "sidekickSessionID", "running"],
         additionalProperties: false,
       },
     },
@@ -148,13 +118,6 @@ export type PairStatus = {
   sidekickAgent: string
 }
 
-/** The `sidekicks` output for one lead session: its sidekick sessions, newest last. */
-export type SidekicksResult = {
-  current?: string
-  sessionIDs: string[]
-  running: boolean
-}
-
 /** The `apply` output: whether the agent reload ran. */
 export type ApplyResult = {
   applied: boolean
@@ -166,28 +129,15 @@ export type SetPairInput = {
   sidekick: ModelRef
 }
 
-/** The `sidekicks` input: the lead session to look up. */
-export type SidekicksInput = {
-  sessionID: string
-}
-
 /** `pairChanged` event data: the pair the server just saved. */
 export type PairChanged = {
   lead: ModelRef
   sidekick: ModelRef
 }
 
-/** `handoffChanged` event data: the handoff state of one lead session. */
-export type HandoffChanged = {
-  leadSessionID: string
-  sidekickSessionID: string
-  running: boolean
-}
-
 /** Event name → unwrapped event data, for `FusionClient.events.on`. */
 export type FusionEvents = {
   pairChanged: PairChanged
-  handoffChanged: HandoffChanged
 }
 
 /** Event names the contract defines. */
@@ -205,7 +155,7 @@ interface RawFusionEvent {
 }
 
 /**
- * What `context.client.rpc(Fusion)` returns: the four methods with `unknown`
+ * What `context.client.rpc(Fusion)` returns: the three methods with `unknown`
  * in and `unknown` out, plus the generic event subscription. Declared
  * structurally and without the trailing `options` parameter so that the real
  * `RpcClient<Fusion>` is assignable to it with no cast at the call site.
@@ -214,7 +164,6 @@ export interface RawFusionClient {
   getPair(input: unknown): Promise<unknown>
   setPair(input: unknown): Promise<unknown>
   apply(input: unknown): Promise<unknown>
-  sidekicks(input: unknown): Promise<unknown>
   events: {
     on<Name extends FusionEventName>(
       name: Name,
@@ -228,7 +177,6 @@ export interface FusionClient {
   getPair(): Promise<PairStatus>
   setPair(input: SetPairInput): Promise<PairStatus>
   apply(): Promise<ApplyResult>
-  sidekicks(input: SidekicksInput): Promise<SidekicksResult>
   events: {
     /** Hands the handler the event's data, not the envelope; returns the disposer. */
     on<Name extends FusionEventName>(name: Name, handler: (event: FusionEvents[Name]) => Promise<void> | void): () => void
@@ -244,7 +192,6 @@ export function fusionClient(raw: RawFusionClient): FusionClient {
     getPair: async () => (await raw.getPair({})) as PairStatus,
     setPair: async (input) => (await raw.setPair(input)) as PairStatus,
     apply: async () => (await raw.apply({})) as ApplyResult,
-    sidekicks: async (input) => (await raw.sidekicks(input)) as SidekicksResult,
     events: {
       on: <Name extends FusionEventName>(name: Name, handler: (event: FusionEvents[Name]) => Promise<void> | void) =>
         raw.events.on(name, async (event) => {

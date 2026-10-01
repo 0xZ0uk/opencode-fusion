@@ -14,54 +14,23 @@ import type { Plugin } from "@opencode/plugin/tui"
 import type { ModelInfo } from "@opencode/client"
 import { Fusion, fusionClient, type PairStatus } from "./rpc.ts"
 import { LEAD_AGENT, SIDEKICK_AGENT, describeModelRef, toHostModel, type FusionPair, type ModelRef } from "./pair.ts"
-import { tierFor } from "./pricing.ts"
 import { savingsReport, type SessionReader } from "./savings.ts"
 import { createModelPricing } from "./model-pricing.ts"
-import { PRESETS, familyOf, resolvePreset } from "./presets.ts"
+import { createPairing, type Catalogue, type Dialogs, type WizardModel } from "./pairing.ts"
+import { sidekickSessions, type SidekickSession } from "./sidekick-state.ts"
 import { versionWarning } from "./version.ts"
 import { claimStatus } from "./status.tsx"
 import { claimKeymap } from "./keymap.tsx"
 
-/** Dialog value meaning "use the model's default effort". */
-const MODEL_DEFAULT = ""
-
-const modelKey = (ref: { providerID: string; modelID: string }): string => `${ref.providerID}|${ref.modelID}`
-
-function splitKey(value: string): { providerID: string; modelID: string } | undefined {
-  const index = value.indexOf("|")
-  if (index <= 0) return undefined
-  return { providerID: value.slice(0, index), modelID: value.slice(index + 1) }
-}
-
-function rate(model: ModelInfo): string {
-  const tier = tierFor(model.cost ?? [], 0)
-  if (!tier) return "no price data"
-  const tiers = (model.cost ?? []).filter((cost) => cost.tier?.type === "context").length
-  const cache = tier.cache ? ` · cache $${tier.cache.read}/$${tier.cache.write}` : ""
-  return `$${tier.input}/M in · $${tier.output}/M out${cache}${tiers > 0 ? ` · +${tiers} context tiers` : ""}`
-}
-
-function contextSize(model: ModelInfo): string {
-  const context = model.limit?.context
-  return typeof context === "number" ? `${Math.round(context / 1000)}k ctx` : "unknown ctx"
-}
-
-function modelOptions(models: ModelInfo[]) {
-  return models.map((model) => ({
-    title: model.name,
-    value: modelKey(model),
-    description: `${model.providerID} · ${contextSize(model)} · ${rate(model)}`,
-    category: model.providerID,
-  }))
-}
-
-function effortOptions(model: ModelInfo) {
-  const variants = (model.variants ?? []).map((variant) => variant.id).filter(Boolean)
-  return [
-    { title: "model default", value: MODEL_DEFAULT, description: `${model.name} default effort` },
-    ...variants.map((id) => ({ title: id, value: id, description: `effort variant "${id}"` })),
-  ]
-}
+/** The host's model, mapped to the structural shape the wizard seam reads. */
+const toWizardModel = (model: ModelInfo): WizardModel => ({
+  providerID: model.providerID,
+  modelID: model.modelID,
+  name: model.name,
+  cost: model.cost,
+  limit: model.limit,
+  variants: model.variants,
+})
 
 const plugin: Plugin.Definition = {
   id: "opencode-fusion.tui",
@@ -71,15 +40,58 @@ const plugin: Plugin.Definition = {
     const warning = versionWarning(context.app?.version)
     if (warning) context.ui.toast.show({ title: "Fusion", message: warning, variant: "warning" })
 
-    // Reactive status-slot state: the pair, the lead agent id, and per-lead
-    // "sidekick running" flags fed by the handoffChanged event.
+    // Reactive status-slot state: the pair, the lead agent id, and a revision
+    // counter for the host's session list.
+    //
+    // `context.data.session.*` is not a reactive read — the TUI context annotates
+    // the reads that are, and those are only the `ui.*` ones — so the sidekick
+    // state the slot renders is derived during render and re-derived when a
+    // session event bumps `sessionsVersion`. The derivation itself is pure and
+    // lives in sidekick-state.ts.
     const [state, setState] = context.storage.memory("fusion-status", {
       initial: {
         pair: undefined as FusionPair | undefined,
         leadAgent: LEAD_AGENT,
-        running: {} as Record<string, boolean>,
+        sessionsVersion: 0,
       },
     })
+
+    /**
+     * The host's sessions, in the shape the sidekick-state derivation reads.
+     *
+     * Run status is merged in here rather than read off the session: the host's
+     * `SessionInfo` has no status field, it is a separate synchronous
+     * `data.session.status(id)` call. `SidekickSession.status` is required, so
+     * dropping this line stops the build instead of silently pinning the status
+     * line to "not running".
+     */
+    const sessionSnapshot = (): SidekickSession[] =>
+      context.data.session.list().map((session) => ({
+        id: session.id,
+        metadata: session.metadata,
+        time: session.time,
+        status: context.data.session.status(session.id),
+      }))
+
+    /**
+     * Session events that can change which sidekicks a lead has, or whether one
+     * runs. Names verified against the host's event types: session.created
+     * (SessionCreated), session.deleted (SessionDeleted), session.metadata.updated
+     * (SessionMetadataUpdated), session.status (SessionStatusUpdated) and
+     * session.idle (SessionIdle).
+     */
+    const SESSION_EVENTS = [
+      "session.created",
+      "session.deleted",
+      "session.metadata.updated",
+      "session.status",
+      "session.idle",
+    ] as const
+    const bumpSessions = () =>
+      setState((draft) => {
+        draft.sessionsVersion += 1
+      })
+    const offSessions = SESSION_EVENTS.map((type) => context.data.on(type, bumpSessions))
 
     const catalogue = async (): Promise<ModelInfo[]> => {
       const location = context.location ?? context.data.location.default()
@@ -115,121 +127,28 @@ const plugin: Plugin.Definition = {
     const offPair = fusion.events.on("pairChanged", () => {
       void loadPair().then(applyStatus, () => {})
     })
-    const offHandoff = fusion.events.on("handoffChanged", (data) => {
-      setState((draft) => {
-        draft.running[data.leadSessionID] = data.running
-      })
-    })
 
-    const refreshRunning = (sessionID: string) => {
-      void fusion
-        .sidekicks({ sessionID })
-        .then(({ running }) => {
-          setState((draft) => {
-            draft.running[sessionID] = running
-          })
-        })
-        .catch(() => {})
-    }
-    const disposeStatus = claimStatus(context, { state, refreshRunning })
+    const disposeStatus = claimStatus(context, { state, sessions: sessionSnapshot })
 
-    const pickModel = async (title: string, models: ModelInfo[], current?: ModelRef): Promise<ModelRef | undefined> => {
-      const value = await context.ui.dialog.select({
-        title,
-        placeholder: "Search models",
-        options: modelOptions(models),
-        ...(current ? { current: modelKey(current) } : {}),
-      })
-      if (!value) return undefined
-      return splitKey(value)
+    // The dialogs and the catalogue, adapted to the wizard's structural seams.
+    const dialogs: Dialogs = {
+      select: async (input) => context.ui.dialog.select(input),
+      alert: async (input) => {
+        await context.ui.dialog.alert(input)
+      },
+      toast: (input) => context.ui.toast.show(input),
     }
-
-    /** Chosen variant ("" = model default), or null when cancelled. */
-    const pickEffort = async (
-      title: string,
-      models: ModelInfo[],
-      picked: { providerID: string; modelID: string },
-      current?: ModelRef,
-    ): Promise<string | null> => {
-      const model = models.find((entry) => modelKey(entry) === modelKey(picked))
-      if (!model || (model.variants ?? []).length === 0) return MODEL_DEFAULT
-      const currentVariant = current && modelKey(current) === modelKey(picked) ? current.variant : undefined
-      const value = await context.ui.dialog.select({
-        title,
-        placeholder: "Effort",
-        options: effortOptions(model),
-        current: currentVariant ?? MODEL_DEFAULT,
-      })
-      return value === undefined ? null : value
+    const wizardCatalogue: Catalogue = {
+      models: async () => (await catalogue()).map(toWizardModel),
     }
+    const pickPair = createPairing({ dialogs, catalogue: wizardCatalogue })
 
     const pairUp = async (): Promise<void> => {
-      const models = await catalogue()
-      if (models.length === 0) {
-        context.ui.toast.show({ message: "Fusion: no models available at this location", variant: "error" })
-        return
-      }
       const current = await loadPair()
-
-      const presetName = await context.ui.dialog.select({
-        title: "Fusion 0/4 · Preset",
-        placeholder: "Preset or custom",
-        options: PRESETS.map((preset) => {
-          if (!preset.providerID) {
-            return { title: preset.name, value: preset.name, description: "pick lead and sidekick by hand" }
-          }
-          const lead = resolvePreset(models, preset, "lead")
-          const sidekick = resolvePreset(models, preset, "sidekick")
-          return lead && sidekick
-            ? { title: preset.name, value: preset.name, description: `${lead.name} lead · ${sidekick.name} sidekick` }
-            : { title: preset.name, value: preset.name, description: "not available at this location", disabled: true }
-        }),
-      })
-      if (!presetName) return
-      const preset = PRESETS.find((entry) => entry.name === presetName)
-      const presetLead = preset ? resolvePreset(models, preset, "lead") : undefined
-      const presetSidekick = preset ? resolvePreset(models, preset, "sidekick") : undefined
-      const presetFits = Boolean(presetLead && presetSidekick)
-      if (preset && preset.name !== "Custom" && !presetFits) {
-        context.ui.toast.show({
-          message: `Fusion: preset "${preset.name}" has no matching models here — pick manually`,
-          variant: "error",
-        })
-      }
-
-      let lead: ModelRef | undefined
-      let sidekick: ModelRef | undefined
-      let leadEffort: string | null = MODEL_DEFAULT
-      let sidekickEffort: string | null = MODEL_DEFAULT
-
-      if (presetFits && presetLead && presetSidekick) {
-        lead = { providerID: presetLead.providerID, modelID: presetLead.modelID }
-        sidekick = { providerID: presetSidekick.providerID, modelID: presetSidekick.modelID }
-        leadEffort = await pickEffort(`Fusion 2/4 · Lead effort (${presetLead.name})`, models, lead, current.pair?.lead)
-        if (leadEffort === null) return
-        sidekickEffort = await pickEffort(
-          `Fusion 4/4 · Sidekick effort (${presetSidekick.name})`,
-          models,
-          sidekick,
-          current.pair?.sidekick,
-        )
-        if (sidekickEffort === null) return
-      } else {
-        lead = await pickModel("Fusion 1/4 · Lead model", models, current.pair?.lead)
-        if (!lead) return
-        leadEffort = await pickEffort("Fusion 2/4 · Lead effort", models, lead, current.pair?.lead)
-        if (leadEffort === null) return
-
-        sidekick = await pickModel("Fusion 3/4 · Sidekick model", models, current.pair?.sidekick)
-        if (!sidekick) return
-        sidekickEffort = await pickEffort("Fusion 4/4 · Sidekick effort", models, sidekick, current.pair?.sidekick)
-        if (sidekickEffort === null) return
-      }
-
-      const next = {
-        lead: { ...lead, ...(leadEffort ? { variant: leadEffort } : {}) },
-        sidekick: { ...sidekick, ...(sidekickEffort ? { variant: sidekickEffort } : {}) },
-      }
+      const picked = await pickPair(current.pair)
+      // Undefined means the user backed out at some step; nothing to save.
+      if (!picked) return
+      const next = picked.pair
 
       try {
         await fusion.setPair(next)
@@ -258,13 +177,13 @@ const plugin: Plugin.Definition = {
         }
       }
 
-      const leadFamily = familyOf(next.lead)
-      const sidekickFamily = familyOf(next.sidekick)
+      // The wizard returns notes rather than toasting them, so the success
+      // toast stays one message composed here.
       context.ui.toast.show({
         title: "Fusion paired",
         message:
           `lead ${describeModelRef(next.lead)} · sidekick ${describeModelRef(next.sidekick)}` +
-          (leadFamily === sidekickFamily ? ` · same family (${leadFamily}): no independent cross-vendor review` : ""),
+          (picked.warnings.length > 0 ? ` · ${picked.warnings.join(" · ")}` : ""),
         variant: "success",
       })
     }
@@ -286,7 +205,7 @@ const plugin: Plugin.Definition = {
         const reader: SessionReader = {
           sessionID,
           getSession: (id) => context.client.session.get({ sessionID: id }),
-          sidekickSessions: () => fusion.sidekicks({ sessionID }).then((result) => result.sessionIDs),
+          sidekickSessions: async () => sidekickSessions(sessionSnapshot(), sessionID),
           listAssistantMessages: (id, cursor) =>
             context.client.message.list({ sessionID: id, type: "assistant", limit: 100, cursor }),
           leadPricing,
@@ -354,7 +273,7 @@ const plugin: Plugin.Definition = {
 
     return () => {
       offPair()
-      offHandoff()
+      for (const off of offSessions) off()
       disposeKeymap()
       disposeStatus()
     }
