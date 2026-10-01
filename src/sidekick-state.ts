@@ -10,16 +10,24 @@
  * TUI can hand it the host's own `SessionInfo[]` without an adapter type.
  */
 
-/** The metadata key naming the lead a sidekick session belongs to. */
-const LEAD_SESSION_KEY = "fusionLeadSession"
+import { LEAD_SESSION_KEY } from "./sidekick-sessions.ts"
 
-/** The structural slice of a host session this module reads. */
+/**
+ * The structural slice of a host session this module reads, plus the run status.
+ *
+ * `status` is required on purpose. The host's own `SessionInfo` has no status
+ * field — run status lives behind a separate `data.session.status(id)` call —
+ * so an optional `status?` would let a raw `SessionInfo[]` typecheck here and
+ * make `sidekickRunning` answer false forever with nothing to catch it.
+ * Requiring it means the call site has to merge the status in explicitly, and
+ * forgetting to does not compile.
+ */
 export type SidekickSession = {
   readonly id: string
   readonly metadata?: Readonly<Record<string, unknown>> | undefined
   readonly time?: { readonly archived?: number | undefined } | undefined
   /** The host's run status for this session: "idle" or "running". */
-  readonly status?: string | undefined
+  readonly status: string
 }
 
 const liveOf = (session: SidekickSession, leadSessionID: string): boolean =>

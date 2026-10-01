@@ -29,8 +29,12 @@ export type SessionHost = {
   switchModel(input: { sessionID: string; model: HostModel }): Promise<void>
 }
 
-/** Metadata every sidekick session carries, naming the lead it belongs to. */
-const LEAD_SESSION_KEY = "fusionLeadSession"
+/**
+ * Metadata every sidekick session carries, naming the lead it belongs to. This
+ * module is the writer — it stamps the key at create time — so the reader in
+ * sidekick-state.ts imports it from here rather than repeating the string.
+ */
+export const LEAD_SESSION_KEY = "fusionLeadSession"
 
 export function createSidekickSessions(deps: {
   host: SessionHost

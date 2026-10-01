@@ -1,7 +1,8 @@
 import { describe, it } from "node:test"
 import assert from "node:assert/strict"
-import { createSidekickSessions, type SessionHost } from "../src/sidekick-sessions.ts"
+import { LEAD_SESSION_KEY, createSidekickSessions, type SessionHost } from "../src/sidekick-sessions.ts"
 import { createRegistry, type SidekickStorage } from "../src/registry.ts"
+import { sidekickSessions } from "../src/sidekick-state.ts"
 import type { FusionPair, HostModel } from "../src/pair.ts"
 
 const SIDEKICK_AGENT = "fusion-sidekick"
@@ -228,6 +229,23 @@ describe("ensure", () => {
 
     assert.equal(await sessions.ensure("lead-1"), "sk-1")
     assert.equal(switches.length, 0)
+  })
+
+  /**
+   * The reader in sidekick-state.ts matches sessions on this key, so writer and
+   * reader must not drift. It imports the constant from this module; this test
+   * pins the literal that the host actually sees in session metadata.
+   */
+  it("stamps the lead marker the sidekick-state reader filters on", async () => {
+    const { host, creates } = fakeHost()
+    const { sessions } = await build(host)
+
+    await sessions.ensure("lead-1")
+
+    assert.equal(LEAD_SESSION_KEY, "fusionLeadSession")
+    assert.equal(creates[0]?.metadata[LEAD_SESSION_KEY], "lead-1")
+    // A sidekick stamped by this module is one the reader finds.
+    assert.deepEqual(sidekickSessions([{ id: "sk-1", status: "idle", metadata: creates[0]?.metadata }], "lead-1"), ["sk-1"])
   })
 
   it("reads the pair late, so a re-pair after setup is honoured", async () => {

@@ -42,9 +42,9 @@ describe("sidekickSessions", () => {
 
   it("ignores a session with no metadata or no time block", () => {
     const sessions: SidekickSession[] = [
-      { id: "sk-1" },
-      { id: "sk-2", metadata: { fusionLeadSession: "lead-1" } },
-      { id: "sk-3", metadata: { fusionLeadSession: "lead-1" }, time: { created: 1, updated: 2 } } as never,
+      { id: "sk-1", status: "idle" },
+      { id: "sk-2", metadata: { fusionLeadSession: "lead-1" }, status: "idle" },
+      { id: "sk-3", metadata: { fusionLeadSession: "lead-1" }, time: {}, status: "idle" },
     ]
     assert.deepEqual(sidekickSessions(sessions, "lead-1"), ["sk-2", "sk-3"])
   })
@@ -61,6 +61,27 @@ describe("sidekickRunning", () => {
     assert.equal(sidekickRunning(sessions, "lead-1"), true)
   })
 
+  /**
+   * The running flag is the whole point of this module, and it is the one thing
+   * that can fail silently: the host's SessionInfo carries no status field, so a
+   * call site that skipped the data.session.status() merge would hand us a list
+   * where every status is undefined and this answer would be false forever.
+   * This test fails the moment the comparison stops recognising "running".
+   */
+  it("flips on for exactly the host's \"running\" status, in both positions", () => {
+    for (const [first, second] of [
+      ["running", "idle"],
+      ["idle", "running"],
+    ] as const) {
+      const sessions = [sidekick("sk-1", "lead-1", { status: first }), sidekick("sk-2", "lead-1", { status: second })]
+      assert.equal(sidekickRunning(sessions, "lead-1"), true, `${first}/${second}`)
+    }
+    // And the same list with every status idle reads false — so the two cases
+    // above are proving the flag, not a constant.
+    const idle = [sidekick("sk-1", "lead-1"), sidekick("sk-2", "lead-1")]
+    assert.equal(sidekickRunning(idle, "lead-1"), false)
+  })
+
   it("is false when the lead's sidekicks are all idle", () => {
     assert.equal(sidekickRunning(SESSIONS, "lead-1"), false)
   })
@@ -75,10 +96,10 @@ describe("sidekickRunning", () => {
     assert.equal(sidekickRunning(sessions, "lead-1"), false)
   })
 
-  it("treats a missing or unknown status as not running", () => {
+  it("treats an unrecognised status as not running", () => {
     const sessions: SidekickSession[] = [
-      { id: "sk-1", metadata: { fusionLeadSession: "lead-1" } },
-      sidekick("sk-2", "lead-1", { status: "busy" }),
+      sidekick("sk-1", "lead-1", { status: "busy" }),
+      sidekick("sk-2", "lead-1", { status: "" }),
     ]
     assert.equal(sidekickRunning(sessions, "lead-1"), false)
   })

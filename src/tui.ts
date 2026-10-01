@@ -90,7 +90,12 @@ const plugin: Plugin.Definition = {
 
     /**
      * The host's sessions, in the shape the sidekick-state derivation reads.
-     * `data.session.status` is a separate synchronous read per session.
+     *
+     * Run status is merged in here rather than read off the session: the host's
+     * `SessionInfo` has no status field, it is a separate synchronous
+     * `data.session.status(id)` call. `SidekickSession.status` is required, so
+     * dropping this line stops the build instead of silently pinning the status
+     * line to "not running".
      */
     const sessionSnapshot = (): SidekickSession[] =>
       context.data.session.list().map((session) => ({
@@ -100,7 +105,13 @@ const plugin: Plugin.Definition = {
         status: context.data.session.status(session.id),
       }))
 
-    /** Session events that can change which sidekicks a lead has, or whether one runs. */
+    /**
+     * Session events that can change which sidekicks a lead has, or whether one
+     * runs. Names verified against the host's event types: session.created
+     * (SessionCreated), session.deleted (SessionDeleted), session.metadata.updated
+     * (SessionMetadataUpdated), session.status (SessionStatusUpdated) and
+     * session.idle (SessionIdle).
+     */
     const SESSION_EVENTS = [
       "session.created",
       "session.deleted",
