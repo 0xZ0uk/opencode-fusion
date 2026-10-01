@@ -95,7 +95,7 @@ function createSessions() {
       return id
     },
     current: (leadSessionID) => map.get(leadSessionID),
-    forget(leadSessionID) {
+    async forget(leadSessionID) {
       forgotten.push(leadSessionID)
       map.delete(leadSessionID)
     },

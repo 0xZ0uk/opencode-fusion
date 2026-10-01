@@ -25,12 +25,12 @@ export type SidekickHost = {
   workingDiff(): Promise<readonly FileStat[]>
 }
 
-/** Registry seam. Recommendation B replaces the implementation; the map must not leak in here. */
+/** Registry seam: persistent sidekick-session bookkeeping, not a raw map. */
 export type SidekickSessions = {
   ensure(leadSessionID: string): Promise<string>
   current(leadSessionID: string): string | undefined
-  /** reset: true drops the lead's current sidekick session. */
-  forget(leadSessionID: string): void
+  /** reset: true drops the lead's current sidekick session; awaited so its write lands before the new session is created. */
+  forget(leadSessionID: string): Promise<void>
 }
 
 export type HandoffChanged = { leadSessionID: string; sidekickSessionID: string; running: boolean }
@@ -200,7 +200,7 @@ export function createHandoffs(deps: {
       }
     }
 
-    if (reset) sessions.forget(leadSessionID)
+    if (reset) await sessions.forget(leadSessionID)
     const sessionID = await sessions.ensure(leadSessionID)
     const handoffID = randomUUID()
     const inbox = await host.prompt({

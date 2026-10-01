@@ -2,9 +2,9 @@
 
 Devin-Fusion-style lead + sidekick model pairing for OpenCode V2: a server
 plugin (`src/server.ts`), a TUI plugin (`src/tui.ts` + `src/status.tsx` +
-`src/keymap.tsx`), a shared RPC contract (`src/rpc.ts`), and pure helper modules
+`src/keymap.tsx`), a shared RPC contract (`src/rpc.ts`), and helper modules
 (`src/pair.ts`, `src/presets.ts`, `src/pricing.ts`, `src/version.ts`,
-`src/prompts.ts`).
+`src/prompts.ts`, `src/handoffs.ts`, `src/registry.ts`).
 
 ## Build and verify
 

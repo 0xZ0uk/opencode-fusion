@@ -16,17 +16,12 @@ import { delegationNudge, leadSystem, SIDEKICK_SYSTEM, type Enforcement } from "
 import { versionWarning } from "./version.ts"
 import { Fusion } from "./rpc.ts"
 import { createHandoffs, type SidekickHost, type SidekickSessions } from "./handoffs.ts"
+import { createRegistry, type SidekickStorage } from "./registry.ts"
 
 const PAIR_KEY = "pair"
-const CHILDREN_KEY = "sidekick-sessions"
-/** lead session -> every sidekick session created for it, oldest first. */
-const SIDEKICK_HISTORY_KEY = "sidekick-history"
-/** Cap on remembered lead→sidekick pairs; the map doubles as an LRU. */
-const CHILDREN_CAP = 200
 
 type AgentModel = NonNullable<Agent.Info["model"]>
 type StoredJson = Parameters<Plugin.Context["storage"]["set"]>[1]
-type UnknownRecord = Record<string, unknown>
 
 type Options = {
   readonly enforce?: Enforcement
@@ -51,9 +46,6 @@ type Rule = { action: string; resource: string; effect: "allow" | "deny" | "ask"
 
 /** Commands the lead keeps: cheap verification and inspection, nothing that writes. */
 const DEFAULT_SHELL_ALLOWLIST = ["git status*", "git diff --stat*", "git diff HEAD --stat*", "git log --oneline*"]
-
-const asRecord = (value: unknown): UnknownRecord | undefined =>
-  typeof value === "object" && value !== null ? (value as UnknownRecord) : undefined
 
 // Opt-in diagnostic trace: set FUSION_TRACE to a file path to record how far
 // the plugin gets. Off unless asked, and never allowed to break setup.
@@ -120,24 +112,6 @@ export function decide(rules: readonly Rule[], action: string, resource: string)
   return effect
 }
 
-function normalizeChildren(value: unknown): Record<string, string> {
-  const record = asRecord(value) ?? {}
-  const out: Record<string, string> = {}
-  for (const [key, entry] of Object.entries(record)) if (typeof entry === "string") out[key] = entry
-  return out
-}
-
-export function normalizeHistory(value: unknown): Record<string, string[]> {
-  const record = asRecord(value) ?? {}
-  const out: Record<string, string[]> = {}
-  for (const [key, entry] of Object.entries(record)) {
-    if (!Array.isArray(entry)) continue
-    const list = entry.filter((item): item is string => typeof item === "string")
-    if (list.length > 0) out[key] = list
-  }
-  return out
-}
-
 const plugin: Plugin.Plugin = {
   id: "opencode-fusion",
   async setup(ctx) {
@@ -161,32 +135,15 @@ const plugin: Plugin.Plugin = {
     trace("pair:loaded", { configured: Boolean(storedPair) })
     let pair: FusionPair | undefined = storedPair && { ...storedPair, leadAgent, sidekickAgent }
 
-    // lead session -> sidekick session, kept across restarts. Insertion order is
-    // recency: reads and writes re-insert so persist can drop the oldest.
-    const children = new Map<string, string>(Object.entries(normalizeChildren(await ctx.storage.get(CHILDREN_KEY))))
-    // lead session -> every sidekick session ever created for it, oldest first.
-    // `reset: true` replaces the child mapping; history keeps the old sessions
-    // reachable so per-session stats do not lose them.
-    const history = new Map<string, string[]>(Object.entries(normalizeHistory(await ctx.storage.get(SIDEKICK_HISTORY_KEY))))
-    for (const [lead, sidekick] of children) {
-      const list = history.get(lead)
-      if (list === undefined) history.set(lead, [sidekick])
-      else if (!list.includes(sidekick)) list.push(sidekick)
+    // The persistent lead→sidekick registry. The storage adapter owns the
+    // StoredJson cast; the registry owns both keys, the cap and the pruning.
+    const storage: SidekickStorage = {
+      get: (key) => ctx.storage.get(key),
+      set: async (key, value) => {
+        await ctx.storage.set(key, toStored(value))
+      },
     }
-    const persistChildren = async () => {
-      while (children.size > CHILDREN_CAP) {
-        const oldest = children.keys().next().value
-        if (oldest === undefined) break
-        children.delete(oldest)
-      }
-      while (history.size > CHILDREN_CAP) {
-        const oldest = history.keys().next().value
-        if (oldest === undefined) break
-        history.delete(oldest)
-      }
-      await ctx.storage.set(CHILDREN_KEY, toStored(Object.fromEntries(children)))
-      await ctx.storage.set(SIDEKICK_HISTORY_KEY, toStored(Object.fromEntries(history)))
-    }
+    const registry = await createRegistry(storage)
 
     const toAgentModel = (ref: ModelRef): AgentModel =>
       ({ id: ref.modelID, providerID: ref.providerID, ...(ref.variant ? { variant: ref.variant } : {}) }) as AgentModel
@@ -259,10 +216,11 @@ const plugin: Plugin.Plugin = {
     }
 
     const ensureSidekickSession = async (leadSessionID: string): Promise<string> => {
-      const existing = children.get(leadSessionID)
+      const existing = registry.current(leadSessionID)
       if (existing) {
-        children.delete(leadSessionID)
-        children.set(leadSessionID, existing)
+        // LRU touch: recording an existing child moves it to the newest end.
+        // Await the write so the touch is durable before the session is reused.
+        await registry.record(leadSessionID, existing)
         try {
           const session = await ctx.session.get({ sessionID: existing })
           if (!session.time.archived) {
@@ -281,7 +239,7 @@ const plugin: Plugin.Plugin = {
         } catch {
           /* the stored session is gone */
         }
-        children.delete(leadSessionID)
+        await registry.reset(leadSessionID)
       }
       const created = await ctx.session.create({
         agent: sidekickAgent,
@@ -290,17 +248,14 @@ const plugin: Plugin.Plugin = {
         metadata: { fusionLeadSession: leadSessionID },
       })
       const id = String(created.id)
-      children.set(leadSessionID, id)
-      const list = history.get(leadSessionID)
-      if (list === undefined) history.set(leadSessionID, [id])
-      else if (!list.includes(id)) list.push(id)
-      await persistChildren()
+      // Await the write: the handoff may start as soon as this returns.
+      await registry.record(leadSessionID, id)
       return id
     }
 
     // Seams the Handoff lifecycle module is built on: the host calls go to
-    // `ctx`, the registry stays here (recommendation B replaces it behind the
-    // same interface).
+    // `ctx`, session bookkeeping to the registry, which sits behind this
+    // interface.
     const host: SidekickHost = {
       prompt: (input) => ctx.session.prompt({ sessionID: input.sessionID, text: input.text, metadata: input.metadata }),
       wait: (sessionID, waitOptions) => ctx.session.wait({ sessionID }, { signal: waitOptions?.signal }),
@@ -314,11 +269,8 @@ const plugin: Plugin.Plugin = {
 
     const sessions: SidekickSessions = {
       ensure: (leadSessionID) => ensureSidekickSession(leadSessionID),
-      current: (leadSessionID) => children.get(leadSessionID),
-      forget: (leadSessionID) => {
-        children.delete(leadSessionID)
-        void persistChildren()
-      },
+      current: (leadSessionID) => registry.current(leadSessionID),
+      forget: (leadSessionID) => registry.reset(leadSessionID),
     }
 
     const handoffs = createHandoffs({ host, sessions, blockTimeoutSeconds })
@@ -425,11 +377,9 @@ const plugin: Plugin.Plugin = {
       },
       sidekicks: async (input) => {
         const sessionID = String((input as { sessionID: string }).sessionID)
-        const current = children.get(sessionID)
-        const recorded = history.get(sessionID) ?? (current ? [current] : [])
         return {
-          current,
-          sessionIDs: current && !recorded.includes(current) ? [...recorded, current] : recorded,
+          current: registry.current(sessionID),
+          sessionIDs: registry.sessions(sessionID),
           running: handoffs.running(sessionID),
         }
       },
@@ -450,23 +400,11 @@ const plugin: Plugin.Plugin = {
           if (event.type === "agent.updated") {
             void ensureApplied()
           } else if (event.type === "session.deleted") {
-            const sessionID = String(event.data.sessionID)
-            let removed = children.delete(sessionID)
-            for (const [leadID, sidekickID] of [...children]) {
-              if (sidekickID === sessionID) {
-                children.delete(leadID)
-                removed = true
-              }
-            }
-            if (history.delete(sessionID)) removed = true
-            for (const [leadID, list] of [...history]) {
-              const kept = list.filter((id) => id !== sessionID)
-              if (kept.length === list.length) continue
-              if (kept.length === 0) history.delete(leadID)
-              else history.set(leadID, kept)
-              removed = true
-            }
-            if (removed) void persistChildren()
+            // Pruning is fire-and-forget here, but a failed write must be
+            // handled explicitly rather than surface as an unhandled rejection.
+            void registry.forget(String(event.data.sessionID)).catch((error) => {
+              trace(`registry:forget:failed ${String(error)}`)
+            })
           } else if (event.type === "session.step.ended") {
             handoffs.onStep(String(event.data.sessionID), event.data)
           }
