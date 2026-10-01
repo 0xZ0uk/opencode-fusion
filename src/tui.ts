@@ -18,6 +18,7 @@ import { tierFor } from "./pricing.ts"
 import { savingsReport, type SessionReader } from "./savings.ts"
 import { createModelPricing } from "./model-pricing.ts"
 import { PRESETS, familyOf, resolvePreset } from "./presets.ts"
+import { sidekickSessions, type SidekickSession } from "./sidekick-state.ts"
 import { versionWarning } from "./version.ts"
 import { claimStatus } from "./status.tsx"
 import { claimKeymap } from "./keymap.tsx"
@@ -71,15 +72,47 @@ const plugin: Plugin.Definition = {
     const warning = versionWarning(context.app?.version)
     if (warning) context.ui.toast.show({ title: "Fusion", message: warning, variant: "warning" })
 
-    // Reactive status-slot state: the pair, the lead agent id, and per-lead
-    // "sidekick running" flags fed by the handoffChanged event.
+    // Reactive status-slot state: the pair, the lead agent id, and a revision
+    // counter for the host's session list.
+    //
+    // `context.data.session.*` is not a reactive read — the TUI context annotates
+    // the reads that are, and those are only the `ui.*` ones — so the sidekick
+    // state the slot renders is derived during render and re-derived when a
+    // session event bumps `sessionsVersion`. The derivation itself is pure and
+    // lives in sidekick-state.ts.
     const [state, setState] = context.storage.memory("fusion-status", {
       initial: {
         pair: undefined as FusionPair | undefined,
         leadAgent: LEAD_AGENT,
-        running: {} as Record<string, boolean>,
+        sessionsVersion: 0,
       },
     })
+
+    /**
+     * The host's sessions, in the shape the sidekick-state derivation reads.
+     * `data.session.status` is a separate synchronous read per session.
+     */
+    const sessionSnapshot = (): SidekickSession[] =>
+      context.data.session.list().map((session) => ({
+        id: session.id,
+        metadata: session.metadata,
+        time: session.time,
+        status: context.data.session.status(session.id),
+      }))
+
+    /** Session events that can change which sidekicks a lead has, or whether one runs. */
+    const SESSION_EVENTS = [
+      "session.created",
+      "session.deleted",
+      "session.metadata.updated",
+      "session.status",
+      "session.idle",
+    ] as const
+    const bumpSessions = () =>
+      setState((draft) => {
+        draft.sessionsVersion += 1
+      })
+    const offSessions = SESSION_EVENTS.map((type) => context.data.on(type, bumpSessions))
 
     const catalogue = async (): Promise<ModelInfo[]> => {
       const location = context.location ?? context.data.location.default()
@@ -115,23 +148,8 @@ const plugin: Plugin.Definition = {
     const offPair = fusion.events.on("pairChanged", () => {
       void loadPair().then(applyStatus, () => {})
     })
-    const offHandoff = fusion.events.on("handoffChanged", (data) => {
-      setState((draft) => {
-        draft.running[data.leadSessionID] = data.running
-      })
-    })
 
-    const refreshRunning = (sessionID: string) => {
-      void fusion
-        .sidekicks({ sessionID })
-        .then(({ running }) => {
-          setState((draft) => {
-            draft.running[sessionID] = running
-          })
-        })
-        .catch(() => {})
-    }
-    const disposeStatus = claimStatus(context, { state, refreshRunning })
+    const disposeStatus = claimStatus(context, { state, sessions: sessionSnapshot })
 
     const pickModel = async (title: string, models: ModelInfo[], current?: ModelRef): Promise<ModelRef | undefined> => {
       const value = await context.ui.dialog.select({
@@ -286,7 +304,7 @@ const plugin: Plugin.Definition = {
         const reader: SessionReader = {
           sessionID,
           getSession: (id) => context.client.session.get({ sessionID: id }),
-          sidekickSessions: () => fusion.sidekicks({ sessionID }).then((result) => result.sessionIDs),
+          sidekickSessions: async () => sidekickSessions(sessionSnapshot(), sessionID),
           listAssistantMessages: (id, cursor) =>
             context.client.message.list({ sessionID: id, type: "assistant", limit: 100, cursor }),
           leadPricing,
@@ -354,7 +372,7 @@ const plugin: Plugin.Definition = {
 
     return () => {
       offPair()
-      offHandoff()
+      for (const off of offSessions) off()
       disposeKeymap()
       disposeStatus()
     }

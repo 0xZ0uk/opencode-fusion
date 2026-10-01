@@ -3,7 +3,6 @@ import assert from "node:assert/strict"
 import {
   createHandoffs,
   type FileStat,
-  type HandoffChanged,
   type SidekickHost,
   type SidekickSessions,
   type StepEnded,
@@ -106,14 +105,12 @@ function createSessions() {
 function setup(options: { blockTimeoutSeconds?: number } = {}) {
   const host = createHost()
   const sessions = createSessions()
-  const events: HandoffChanged[] = []
   const handoffs = createHandoffs({
     host: host.host,
     sessions: sessions.sessions,
     blockTimeoutSeconds: options.blockTimeoutSeconds ?? 1800,
   })
-  handoffs.setEmitter((event) => events.push(event))
-  return { ...host, ...sessions, handoffs, events }
+  return { ...host, ...sessions, handoffs }
 }
 
 /** Delegate helper with sensible defaults; returns the delegate promise. */
@@ -178,11 +175,6 @@ describe("delegate", () => {
     assert.equal(t.prompts[0]?.sessionID, "sk-1")
     assert.equal(t.prompts[0]?.text, "do the thing")
     assert.equal(progress[0]?.title, "sidekick running")
-    assert.deepEqual(t.events, [
-      { leadSessionID: "lead-1", sidekickSessionID: "sk-1", running: true },
-      { leadSessionID: "lead-1", sidekickSessionID: "sk-1", running: false },
-    ])
-    assert.equal(t.handoffs.running("lead-1"), false)
   })
 
   it("forgets the sidekick session before ensure when reset is set", async () => {
@@ -214,7 +206,6 @@ describe("delegate", () => {
     assert.match(t.synthetics[0]?.text ?? "", /^<sidekick_report session="sk-1" handoff="[0-9a-f-]+">\n/)
     assert.match(t.synthetics[0]?.text ?? "", /background report/)
     assert.match(t.synthetics[0]?.text ?? "", /\n<\/sidekick_report>$/)
-    assert.equal(t.events.at(-1)?.running, false)
   })
 
   it("detaches to the background on timeout and posts the report later", async () => {
@@ -245,8 +236,6 @@ describe("delegate", () => {
     assert.equal(result.content, "sidekick: cancelled — the lead's turn was aborted; the sidekick was interrupted.")
     assert.deepEqual(t.interrupts, ["sk-1"])
     assert.equal(t.synthetics.length, 0)
-    assert.equal(t.handoffs.running("lead-1"), false)
-    assert.deepEqual(t.events.at(-1), { leadSessionID: "lead-1", sidekickSessionID: "sk-1", running: false })
   })
 })
 

@@ -26,7 +26,6 @@ function fakeRaw() {
         sidekickAgent: "fusion-sidekick",
       }),
     apply: (input) => returnValue("apply", input, { applied: true }),
-    sidekicks: (input) => returnValue("sidekicks", input, { current: "ses_side", sessionIDs: ["ses_side"], running: true }),
     events: {
       on: (name, handler) => {
         const list = handlers.get(name) ?? []
@@ -80,15 +79,6 @@ describe("fusionClient", () => {
     assert.deepEqual(calls, [{ method: "apply", input: {} }])
   })
 
-  it("passes the sessionID through to the sidekicks call", async () => {
-    const { raw, calls } = fakeRaw()
-    const fusion = fusionClient(raw)
-    const result = await fusion.sidekicks({ sessionID: "ses_lead" })
-    assert.deepEqual(calls, [{ method: "sidekicks", input: { sessionID: "ses_lead" } }])
-    assert.deepEqual(result.sessionIDs, ["ses_side"])
-    assert.equal(result.running, true)
-  })
-
   it("unwraps event data for the handler", () => {
     const { raw, emit } = fakeRaw()
     const fusion = fusionClient(raw)
@@ -100,17 +90,6 @@ describe("fusionClient", () => {
     assert.deepEqual(seen, [
       { lead: { providerID: "p", modelID: "m" }, sidekick: { providerID: "p", modelID: "n" } },
     ])
-  })
-
-  it("keeps event types apart: handoffChanged carries the session ids and flag", () => {
-    const { raw, emit } = fakeRaw()
-    const fusion = fusionClient(raw)
-    const running: Record<string, boolean> = {}
-    fusion.events.on("handoffChanged", (event) => {
-      running[event.leadSessionID] = event.running
-    })
-    emit("handoffChanged", { leadSessionID: "ses_lead", sidekickSessionID: "ses_side", running: true })
-    assert.deepEqual(running, { ses_lead: true })
   })
 
   it("stops delivering once the returned disposer is called", () => {

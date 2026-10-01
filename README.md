@@ -17,7 +17,9 @@ Status: working skeleton, verified against OpenCode `2.0.19`.
   rates (priced per message, context tier included).
 - `/fusion-show` (palette) — the active pairing and the live model's variants.
 - A `prompt.footer.status` line on lead sessions: `fusion <lead> → <sidekick>`, plus
-  `· sidekick running` while a handoff is in flight.
+  `· sidekick running` while a handoff is in flight. The TUI derives both from the
+  host's session list, so the line is right even for a sidekick this process did
+  not start.
 - A `sidekick` tool for the lead: hands work to a **persistent** sidekick session
   (its context survives handoffs), foreground or background. Reports are matched to
   their handoff and end with the list of files the sidekick changed.
@@ -121,9 +123,9 @@ Load the plugin straight from a checkout — the server half by path in
   with the changed-file list (with working-tree +A/−D when available).
 - The sidekick session persists per lead session: re-picking the pair re-syncs
   its model, archived or deleted sessions are pruned and recreated, and the
-  remembered set is a capped LRU. A separate per-lead history remembers every
-  sidekick session ever created, so `reset: true` does not hide older sessions
-  from `/fusion-stats`.
+  remembered set is a capped LRU. Every sidekick session carries the lead's id in
+  its metadata, so `reset: true` does not hide older sessions from
+  `/fusion-stats` — those are found from the host's session list.
 
 ## Enforced vs advised
 
@@ -160,9 +162,12 @@ npm run check   # tsc --noEmit + node --test
 ```
 
 Tests run on plain Node type stripping against the pure modules (`src/pair.ts`,
-`src/presets.ts`, `src/pricing.ts`, `src/version.ts`, `src/prompts.ts`,
-`src/policy.ts`, `src/handoffs.ts`, `src/registry.ts`). `src/status.tsx` and
-`src/keymap.tsx` are the only JSX files.
+`src/presets.ts`, `src/policy.ts`, `src/prompts.ts`, `src/handoffs.ts`,
+`src/registry.ts`, `src/sidekick-sessions.ts`, `src/sidekick-state.ts`,
+`src/pricing.ts`, `src/model-pricing.ts`, `src/savings.ts`, `src/version.ts`).
+`src/status.tsx` and `src/keymap.tsx` are the only JSX files.
+
+`GLOSSARY.md` names the domain terms and the module that owns each one.
 
 ## Verified
 

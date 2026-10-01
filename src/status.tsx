@@ -6,42 +6,41 @@
  * and `solid-js` at runtime.
  */
 import type { Plugin } from "@opencode/plugin/tui"
-import { Show, createEffect, on } from "solid-js"
+import { Show } from "solid-js"
 import { describeModelName, type FusionPair } from "./pair.ts"
+import { sidekickRunning, type SidekickSession } from "./sidekick-state.ts"
 
 export type FusionStatusState = {
   pair: FusionPair | undefined
   leadAgent: string
-  /** lead session id -> whether a handoff is in flight */
-  running: Record<string, boolean>
+  /**
+   * Bumped by the TUI plugin on every session event. `data.session.*` is not a
+   * reactive read, so this is what pulls a fresh host snapshot into the render.
+   */
+  sessionsVersion: number
 }
 
 export type FusionStatusDeps = {
   readonly state: FusionStatusState
-  readonly refreshRunning: (sessionID: string) => void
+  /** The host's sessions in the shape the sidekick-state derivation reads. */
+  readonly sessions: () => readonly SidekickSession[]
 }
 
 function FusionStatus(props: {
   context: Plugin.Context
   state: FusionStatusState
-  refreshRunning: (sessionID: string) => void
+  sessions: () => readonly SidekickSession[]
   sessionID: string | undefined
 }) {
-  // Re-check the running flag when this claim mounts or the session changes.
-  createEffect(
-    on(
-      () => props.sessionID,
-      (sessionID) => {
-        if (sessionID) props.refreshRunning(sessionID)
-      },
-    ),
-  )
   const leadSession = () =>
     Boolean(props.sessionID) && props.context.data.session.get(props.sessionID as string)?.agent === props.state.leadAgent
   const text = () => {
     const pair = props.state.pair
     if (!pair) return "fusion · no pair (run /fusion)"
-    const running = props.sessionID && props.state.running[props.sessionID] ? " · sidekick running" : ""
+    // Read the revision so the sentence re-derives when the host's sessions change.
+    void props.state.sessionsVersion
+    const running =
+      props.sessionID && sidekickRunning(props.sessions(), props.sessionID) ? " · sidekick running" : ""
     return `fusion ${describeModelName(pair.lead)} → ${describeModelName(pair.sidekick)}${running}`
   }
   return (
@@ -56,7 +55,7 @@ export function claimStatus(context: Plugin.Context, deps: FusionStatusDeps): ()
   return context.ui.slot({
     append: "prompt.footer.status",
     render: (input) => (
-      <FusionStatus context={context} state={deps.state} refreshRunning={deps.refreshRunning} sessionID={input.sessionID} />
+      <FusionStatus context={context} state={deps.state} sessions={deps.sessions} sessionID={input.sessionID} />
     ),
   })
 }

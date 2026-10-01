@@ -33,8 +33,6 @@ export type SidekickSessions = {
   forget(leadSessionID: string): Promise<void>
 }
 
-export type HandoffChanged = { leadSessionID: string; sidekickSessionID: string; running: boolean }
-
 export type Handoffs = {
   delegate(input: {
     leadSessionID: string
@@ -46,9 +44,7 @@ export type Handoffs = {
   }): Promise<{ content: string; metadata?: Record<string, unknown> }>
   status(leadSessionID: string): string
   cancel(leadSessionID: string): Promise<string>
-  running(leadSessionID: string): boolean
   onStep(sessionID: string, data: StepEnded): void
-  setEmitter(emit: ((event: HandoffChanged) => void) | undefined): void
 }
 
 /** Text of the last non-empty assistant message in `messages[from..to)`. */
@@ -110,24 +106,16 @@ export function createHandoffs(deps: {
   const { host, sessions, blockTimeoutSeconds } = deps
 
   // In-flight handoffs: lead session -> handoff id -> record. Process-local;
-  // a restart loses them, which `status` says out loud.
+  // a restart loses them, which `status` says out loud. The TUI no longer
+  // watches this: it derives "sidekick running" from the host's session status.
   type Handoff = { sessionID: string; inboxID?: string; started: number; block: boolean; cancelled?: boolean }
   const active = new Map<string, Map<string, Handoff>>()
-
-  // Assigned once the RPC registration lands; a no-op before that.
-  let emitHandoff: ((event: HandoffChanged) => void) | undefined
-
-  const emit = (leadSessionID: string, sidekickSessionID: string, running: boolean) => {
-    emitHandoff?.({ leadSessionID, sidekickSessionID, running })
-  }
 
   const dropHandoff = (leadSessionID: string, handoffID: string) => {
     const handoffs = active.get(leadSessionID)
     if (!handoffs) return
-    const sidekickSessionID = handoffs.get(handoffID)?.sessionID
     handoffs.delete(handoffID)
     if (handoffs.size === 0) active.delete(leadSessionID)
-    if (sidekickSessionID) emit(leadSessionID, sidekickSessionID, handoffs.size > 0)
   }
 
   // `session.step.ended` events fanned out per sidekick session, for progress.
@@ -214,7 +202,6 @@ export function createHandoffs(deps: {
       active.set(leadSessionID, handoffs)
     }
     handoffs.set(handoffID, { sessionID, inboxID: String(inbox.id), started: Date.now(), block })
-    emit(leadSessionID, sessionID, true)
 
     await safeProgress({ sessionID, title: "sidekick running", status: "running" })
 
@@ -323,16 +310,10 @@ export function createHandoffs(deps: {
     )
   }
 
-  const running = (leadSessionID: string): boolean => (active.get(leadSessionID)?.size ?? 0) > 0
-
   const onStep = (sessionID: string, data: StepEnded): void => {
     const listeners = stepListeners.get(sessionID)
     if (listeners) for (const listener of listeners) listener(data)
   }
 
-  const setEmitter = (emit: ((event: HandoffChanged) => void) | undefined): void => {
-    emitHandoff = emit
-  }
-
-  return { delegate, status, cancel, running, onStep, setEmitter }
+  return { delegate, status, cancel, onStep }
 }
