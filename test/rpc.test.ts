@@ -17,13 +17,13 @@ function fakeRaw() {
     return Promise.resolve(value)
   }
   const raw: RawFusionClient = {
-    getPair: (input) => returnValue("getPair", input, { configured: false, leadAgent: "fusion-lead", sidekickAgent: "fusion-sidekick" }),
+    getPair: (input) => returnValue("getPair", input, { configured: false, leadAgent: "fusion", sidekickAgent: "sidekick" }),
     setPair: (input) =>
       returnValue("setPair", input, {
         configured: true,
-        pair: { ...(input as object), leadAgent: "fusion-lead", sidekickAgent: "fusion-sidekick" },
-        leadAgent: "fusion-lead",
-        sidekickAgent: "fusion-sidekick",
+        pair: { ...(input as object), leadAgent: "fusion", sidekickAgent: "sidekick" },
+        leadAgent: "fusion",
+        sidekickAgent: "sidekick",
       }),
     apply: (input) => returnValue("apply", input, { applied: true }),
     events: {
@@ -53,9 +53,9 @@ describe("fusionClient", () => {
     const fusion = fusionClient(raw)
     const status: PairStatus = await fusion.getPair()
     assert.equal(status.configured, false)
-    assert.equal(status.leadAgent, "fusion-lead")
+    assert.equal(status.leadAgent, "fusion")
     assert.equal(status.pair, undefined)
-    assert.deepEqual(status, { configured: false, leadAgent: "fusion-lead", sidekickAgent: "fusion-sidekick" })
+    assert.deepEqual(status, { configured: false, leadAgent: "fusion", sidekickAgent: "sidekick" })
   })
 
   it("forwards the setPair input and returns the saved pair result", async () => {

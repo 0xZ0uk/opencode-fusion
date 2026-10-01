@@ -36,8 +36,8 @@ export interface FusionPair {
   readonly sidekickAgent: string
 }
 
-export const LEAD_AGENT = "fusion-lead"
-export const SIDEKICK_AGENT = "fusion-sidekick"
+export const LEAD_AGENT = "fusion"
+export const SIDEKICK_AGENT = "sidekick"
 
 export function isModelRef(value: unknown): value is ModelRef {
   if (typeof value !== "object" || value === null) return false

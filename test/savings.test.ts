@@ -23,8 +23,8 @@ const COSTS = [BASE, LARGE, XLARGE]
 const PAIR: FusionPair = {
   lead: { providerID: "leadco", modelID: "big", variant: "high" },
   sidekick: { providerID: "cheap", modelID: "small" },
-  leadAgent: "fusion-lead",
-  sidekickAgent: "fusion-sidekick",
+  leadAgent: "fusion",
+  sidekickAgent: "sidekick",
 }
 
 const usage = (input: number, output = 0, reasoning = 0, read = 0, write = 0) => ({

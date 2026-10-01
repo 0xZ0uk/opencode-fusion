@@ -71,7 +71,7 @@ export function createSidekickSessions(deps: {
     const created = await host.create({
       agent: sidekickAgent,
       ...(pair ? { model: toHostModel(pair.sidekick) } : {}),
-      title: pair ? `Fusion sidekick · ${pair.sidekick.modelID}` : "Fusion sidekick",
+      title: pair ? `Sidekick · ${pair.sidekick.modelID}` : "Sidekick",
       metadata: { [LEAD_SESSION_KEY]: leadSessionID },
     })
     // Await the write: the handoff may start as soon as this returns.

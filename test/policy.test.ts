@@ -2,7 +2,7 @@ import { describe, it } from "node:test"
 import assert from "node:assert/strict"
 import { DEFAULT_SHELL_ALLOWLIST, leadPolicy, sidekickRules } from "../src/policy.ts"
 
-const SIDEKICK = "fusion-sidekick"
+const SIDEKICK = "sidekick"
 const NUDGE = (action: string) =>
   `Fusion: the lead may not use "${action}". Delegate this to the sidekick with the \`sidekick\` tool.`
 

@@ -12,8 +12,8 @@ describe("normalizePair", () => {
     const result = normalizePair(pair)
     assert.equal(result?.lead.modelID, "gpt-5.6-sol")
     assert.equal(result?.sidekick.variant, "high")
-    assert.equal(result?.leadAgent, "fusion-lead")
-    assert.equal(result?.sidekickAgent, "fusion-sidekick")
+    assert.equal(result?.leadAgent, "fusion")
+    assert.equal(result?.sidekickAgent, "sidekick")
   })
 
   it("keeps custom agent ids", () => {

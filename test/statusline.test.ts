@@ -6,33 +6,33 @@ import type { FusionPair } from "../src/pair.ts"
 const PAIR: FusionPair = {
   lead: { providerID: "openai", modelID: "gpt-5.6-sol", variant: "high" },
   sidekick: { providerID: "openai", modelID: "gpt-5.6-luna" },
-  leadAgent: "fusion-lead",
-  sidekickAgent: "fusion-sidekick",
+  leadAgent: "fusion",
+  sidekickAgent: "sidekick",
 }
 
-const configured: StatusLineState = { pair: PAIR, leadAgent: "fusion-lead" }
-const unconfigured: StatusLineState = { pair: undefined, leadAgent: "fusion-lead" }
+const configured: StatusLineState = { pair: PAIR, leadAgent: "fusion" }
+const unconfigured: StatusLineState = { pair: undefined, leadAgent: "fusion" }
 
 describe("isLeadSession", () => {
   it("is true for a session on the lead agent", () => {
-    assert.equal(isLeadSession(configured, "ses_1", "fusion-lead"), true)
+    assert.equal(isLeadSession(configured, "ses_1", "fusion"), true)
   })
 
   it("is false for a session on any other agent", () => {
     assert.equal(isLeadSession(configured, "ses_1", "build"), false)
-    assert.equal(isLeadSession(configured, "ses_1", "fusion-sidekick"), false)
+    assert.equal(isLeadSession(configured, "ses_1", "sidekick"), false)
   })
 
   it("is false when the session has no agent, or no session is in view", () => {
     assert.equal(isLeadSession(configured, "ses_1", undefined), false)
-    assert.equal(isLeadSession(configured, undefined, "fusion-lead"), false)
+    assert.equal(isLeadSession(configured, undefined, "fusion"), false)
     assert.equal(isLeadSession(configured, undefined, undefined), false)
   })
 
   it("follows the configured lead agent rather than a hardcoded one", () => {
     const custom: StatusLineState = { pair: PAIR, leadAgent: "my-lead" }
     assert.equal(isLeadSession(custom, "ses_1", "my-lead"), true)
-    assert.equal(isLeadSession(custom, "ses_1", "fusion-lead"), false)
+    assert.equal(isLeadSession(custom, "ses_1", "fusion"), false)
   })
 })
 
@@ -57,7 +57,7 @@ describe("statusText", () => {
   it("shows the model default with no variant marker", () => {
     const plain: StatusLineState = {
       pair: { ...PAIR, lead: { providerID: "openai", modelID: "gpt-5.6-sol" } },
-      leadAgent: "fusion-lead",
+      leadAgent: "fusion",
     }
     assert.equal(statusText(plain, "ses_1", false), "fusion gpt-5.6-sol → gpt-5.6-luna")
   })

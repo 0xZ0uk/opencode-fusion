@@ -3,8 +3,8 @@
 Terminology for this plugin, in the order the code meets it. One line each.
 
 - **pair** — the lead + sidekick model pairing the plugin applies to its two agents (src/pair.ts).
-- **lead** — the frontier model that plans, decides and reviews; runs the fusion-lead agent and owns the task.
-- **sidekick** — the cheaper model that executes in its own persistent session; runs the fusion-sidekick agent as a subagent.
+- **lead** — the frontier model that plans, decides and reviews; runs the fusion agent and owns the task.
+- **sidekick** — the cheaper model that executes in its own persistent session; runs the sidekick agent as a subagent.
 - **model ref** — a stored model selection: providerID + modelID + effort variant (src/pair.ts).
 - **effort variant** — the effort/reasoning level on a model ref; absent means the model default.
 - **handoff** — one delegated turn: a brief sent to the lead's sidekick session and the report that comes back (src/handoffs.ts).

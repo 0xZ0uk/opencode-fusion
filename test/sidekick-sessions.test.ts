@@ -5,12 +5,12 @@ import { createRegistry, type SidekickStorage } from "../src/registry.ts"
 import { sidekickSessions } from "../src/sidekick-state.ts"
 import type { FusionPair, HostModel } from "../src/pair.ts"
 
-const SIDEKICK_AGENT = "fusion-sidekick"
+const SIDEKICK_AGENT = "sidekick"
 
 const PAIR: FusionPair = {
   lead: { providerID: "leadco", modelID: "big", variant: "high" },
   sidekick: { providerID: "cheap", modelID: "small" },
-  leadAgent: "fusion-lead",
+  leadAgent: "fusion",
   sidekickAgent: SIDEKICK_AGENT,
 }
 
@@ -103,7 +103,7 @@ describe("ensure", () => {
       {
         agent: SIDEKICK_AGENT,
         model: hostModel("small"),
-        title: "Fusion sidekick · small",
+        title: "Sidekick · small",
         metadata: { fusionLeadSession: "lead-1" },
       },
     ])
@@ -118,7 +118,7 @@ describe("ensure", () => {
 
     assert.equal(await sessions.ensure("lead-1"), "sk-1")
     assert.deepEqual(creates, [
-      { agent: SIDEKICK_AGENT, title: "Fusion sidekick", metadata: { fusionLeadSession: "lead-1" } },
+      { agent: SIDEKICK_AGENT, title: "Sidekick", metadata: { fusionLeadSession: "lead-1" } },
     ])
   })
 

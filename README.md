@@ -59,16 +59,27 @@ exist in config. Fetch the two markdown files — the one place the agents are d
 and do not also declare them in a config `agents` block:
 
 ```bash
-curl -fsSL -o ~/.config/opencode/agents/fusion-lead.md \
-  https://raw.githubusercontent.com/0xZ0uk/opencode-fusion/main/examples/agents/fusion-lead.md
-curl -fsSL -o ~/.config/opencode/agents/fusion-sidekick.md \
-  https://raw.githubusercontent.com/0xZ0uk/opencode-fusion/main/examples/agents/fusion-sidekick.md
+curl -fsSL -o ~/.config/opencode/agents/fusion.md \
+  https://raw.githubusercontent.com/0xZ0uk/opencode-fusion/main/examples/agents/fusion.md
+curl -fsSL -o ~/.config/opencode/agents/sidekick.md \
+  https://raw.githubusercontent.com/0xZ0uk/opencode-fusion/main/examples/agents/sidekick.md
 ```
 
 Leave them bare as shipped: the plugin supplies the model, system prompt and permissions
 at startup, and replaces them on every `/fusion` pick.
 
 Then restart OpenCode (config loads at startup) and run `/fusion`.
+
+**Renamed agents.** The two agents used to be `fusion-lead` and `fusion-sidekick`; they are
+now `fusion` and `sidekick`. An agent's id comes from its filename, so an existing install
+has to fetch the two files above under their new names and delete the old ones — the plugin
+looks up the new ids and will not find `fusion-lead`:
+
+```bash
+rm -f ~/.config/opencode/agents/fusion-lead.md ~/.config/opencode/agents/fusion-sidekick.md
+```
+
+Your picked pair and any existing sidekick sessions carry over untouched.
 
 **3. Options** — `plugin add` writes a plain string entry; to pass options, replace it
 with the object form:
@@ -177,8 +188,8 @@ Against a real `opencode serve` on 2.0.19, with `FUSION_TRACE` pointed at a file
 - plugin loads from `.opencode/plugins/fusion/`, all setup stages run, RPC registers
 - `POST /api/rpc/fusion/getPair|setPair|apply` round-trips; the JSON Schemas are enforced
   (`rpc.invalid_input` names the missing key) and storage persists across processes
-- a picked pair lands on the agents: `fusion-lead` = `openrouter/muse/6-astra#high` with
-  10 permission rules, `fusion-sidekick` = `openrouter/z-ai/glm-5.3-flash` with 3
+- a picked pair lands on the agents: `fusion` = `openrouter/muse/6-astra#high` with
+  10 permission rules, `sidekick` = `openrouter/z-ai/glm-5.3-flash` with 3
 - `tsc --noEmit` and `node --test` are clean against the real `@opencode/plugin` types
 
 And against a real TUI on 2.0.20 (`opencode --standalone`, plugin loaded from a
@@ -208,7 +219,7 @@ These were found the hard way; the first is why `server.ts` has a deferred
 re-apply, the second is why the keymap lives in a slot.
 
 1. **Plugins load before config agents exist.** During the first `agent.transform` the
-   editor cannot see `fusion-lead` at all, so a `get()`-and-mutate transform silently does
+   editor cannot see `fusion` at all, so a `get()`-and-mutate transform silently does
    nothing. Use `editor.update(id, fn)` — it applies when the agent appears — and reload
    once the agents have landed.
 2. **`ctx.agent.reload()` emits `agent.updated`.** A reactive "reload whenever agents
