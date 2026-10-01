@@ -1,7 +1,7 @@
 import { describe, it } from "node:test"
 import assert from "node:assert/strict"
 import { isLeadSession, statusText, type StatusLineState } from "../src/statusline.ts"
-import type { FusionPair } from "../src/pair.ts"
+import type { FusionPair, ModelRef } from "../src/pair.ts"
 
 const PAIR: FusionPair = {
   lead: { providerID: "openai", modelID: "gpt-5.6-sol", variant: "high" },
@@ -38,11 +38,11 @@ describe("isLeadSession", () => {
 
 describe("statusText", () => {
   it("names the pair, dropping the provider and keeping the variant", () => {
-    assert.equal(statusText(configured, "ses_1", false), "fusion gpt-5.6-sol#high → gpt-5.6-luna")
+    assert.equal(statusText(configured, "ses_1", false), "fusion gpt-5.6-sol#high ◆ gpt-5.6-luna")
   })
 
   it("adds the running suffix when this lead's sidekick is working", () => {
-    assert.equal(statusText(configured, "ses_1", true), "fusion gpt-5.6-sol#high → gpt-5.6-luna · sidekick running")
+    assert.equal(statusText(configured, "ses_1", true), "fusion gpt-5.6-sol#high ◆ gpt-5.6-luna · sidekick running")
   })
 
   it("prompts for /fusion when no pair is picked, with or without a running flag", () => {
@@ -51,7 +51,7 @@ describe("statusText", () => {
   })
 
   it("drops the running suffix when no session is in view", () => {
-    assert.equal(statusText(configured, undefined, true), "fusion gpt-5.6-sol#high → gpt-5.6-luna")
+    assert.equal(statusText(configured, undefined, true), "fusion gpt-5.6-sol#high ◆ gpt-5.6-luna")
   })
 
   it("shows the model default with no variant marker", () => {
@@ -59,6 +59,47 @@ describe("statusText", () => {
       pair: { ...PAIR, lead: { providerID: "openai", modelID: "gpt-5.6-sol" } },
       leadAgent: "fusion",
     }
-    assert.equal(statusText(plain, "ses_1", false), "fusion gpt-5.6-sol → gpt-5.6-luna")
+    assert.equal(statusText(plain, "ses_1", false), "fusion gpt-5.6-sol ◆ gpt-5.6-luna")
+  })
+})
+
+describe("statusText live lead selection", () => {
+  const live: ModelRef = { providerID: "anthropic", modelID: "claude-opus-9", variant: "max" }
+
+  it("shows the live model instead of the saved lead", () => {
+    assert.equal(statusText(configured, "ses_1", false, live), "fusion claude-opus-9#max ◆ gpt-5.6-luna")
+  })
+
+  it("keeps distinct alias ids distinct", () => {
+    const alias: ModelRef = { providerID: "openai", modelID: "gpt-5.6-sol-fast", variant: "high" }
+    assert.equal(statusText(configured, "ses_1", false, alias), "fusion gpt-5.6-sol-fast#high ◆ gpt-5.6-luna")
+  })
+
+  it("shows a live variant that differs from the saved one", () => {
+    const effort: ModelRef = { providerID: "openai", modelID: "gpt-5.6-sol", variant: "low" }
+    assert.equal(statusText(configured, "ses_1", false, effort), "fusion gpt-5.6-sol#low ◆ gpt-5.6-luna")
+  })
+
+  it("shows no variant marker when the live selection is the model default", () => {
+    const plain: ModelRef = { providerID: "openai", modelID: "gpt-5.6-sol" }
+    assert.equal(statusText(configured, "ses_1", false, plain), "fusion gpt-5.6-sol ◆ gpt-5.6-luna")
+  })
+
+  it("falls back to the saved lead when no live model is selected", () => {
+    assert.equal(statusText(configured, "ses_1", false, undefined), "fusion gpt-5.6-sol#high ◆ gpt-5.6-luna")
+  })
+
+  it("keeps the sidekick and the running suffix off the live selection", () => {
+    assert.equal(
+      statusText(configured, "ses_1", true, live),
+      "fusion claude-opus-9#max ◆ gpt-5.6-luna · sidekick running",
+    )
+    assert.equal(statusText(unconfigured, "ses_1", false, live), "fusion · no pair (run /fusion)")
+  })
+
+  it("does not mutate the saved pair", () => {
+    const snapshot = structuredClone(PAIR)
+    statusText(configured, "ses_1", false, live)
+    assert.deepEqual(configured.pair, snapshot)
   })
 })

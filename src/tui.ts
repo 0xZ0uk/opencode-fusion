@@ -14,7 +14,8 @@ import type { Plugin } from "@opencode/plugin/tui"
 import type { ModelInfo } from "@opencode/client"
 import { Effect } from "effect"
 import { Fusion, fusionClient, type PairStatus } from "./rpc.ts"
-import { LEAD_AGENT, SIDEKICK_AGENT, describeModelRef, toHostModel, type FusionPair, type ModelRef } from "./pair.ts"
+import { LEAD_AGENT, SIDEKICK_AGENT, describeModelRef, type FusionPair, type ModelRef } from "./pair.ts"
+import { activateLead } from "./tui-activation.ts"
 import { collectSavings, type SessionReader } from "./savings.ts"
 import { savingsTable } from "./savings-table.ts"
 import { showSavingsDialog } from "./savings-dialog.tsx"
@@ -84,6 +85,8 @@ const plugin: Plugin.Definition = {
         "session.metadata.updated",
         "session.status",
         "session.idle",
+        "session.agent.selected",
+        "session.model.selected",
       ] as const
       const bumpSessions = () =>
         setState((draft) => {
@@ -170,36 +173,30 @@ const plugin: Plugin.Definition = {
 
         // Follow the lead: move the live session onto the lead agent and the
         // picked lead model now.
-        const route = context.ui.router.current()
-        if (route.type === "session") {
-          yield* fromPromise(() =>
-            context.client.session.switchAgent({ sessionID: route.sessionID, agent: current.leadAgent }),
-          ).pipe(
-            Effect.catch((error) =>
-              Effect.sync(() => console.warn(`[fusion] could not switch the live session agent: ${String(error)}`)),
-            ),
-          )
-          yield* fromPromise(() =>
-            context.client.session.switchModel({
-              sessionID: route.sessionID,
-              model: toHostModel(next.lead),
+        const activated = yield* activateLead(context, saved).pipe(
+          Effect.as(true),
+          Effect.catch((error) =>
+            Effect.sync(() => {
+              context.ui.toast.show({
+                title: "Fusion",
+                message: `pair saved, but live-session activation failed — ${String(error)}`,
+                variant: "warning",
+              })
+              return false
             }),
-          ).pipe(
-            Effect.catch((error) =>
-              Effect.sync(() => console.warn(`[fusion] could not switch the live session model: ${String(error)}`)),
-            ),
-          )
-        }
+          ),
+        )
 
         // The wizard returns notes rather than toasting them, so the success
         // toast stays one message composed here.
-        context.ui.toast.show({
-          title: "Fusion paired",
-          message:
-            `lead ${describeModelRef(next.lead)} · sidekick ${describeModelRef(next.sidekick)}` +
-            (picked.warnings.length > 0 ? ` · ${picked.warnings.join(" · ")}` : ""),
-          variant: "success",
-        })
+        if (activated)
+          context.ui.toast.show({
+            title: "Fusion paired",
+            message:
+              `lead ${describeModelRef(next.lead)} · sidekick ${describeModelRef(next.sidekick)}` +
+              (picked.warnings.length > 0 ? ` · ${picked.warnings.join(" · ")}` : ""),
+            variant: "success",
+          })
       })
 
       /**

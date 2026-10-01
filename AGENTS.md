@@ -7,7 +7,8 @@ plugin (`src/server.ts`), a TUI plugin (`src/tui.ts` + `src/status.tsx` +
 (`src/pair.ts`, `src/presets.ts`, `src/pairing.ts`, `src/statusline.ts`,
 `src/policy.ts`, `src/prompts.ts`, `src/handoffs.ts`, `src/registry.ts`,
 `src/sidekick-sessions.ts`, `src/sidekick-state.ts`, `src/costs.ts`,
-`src/savings.ts`, `src/savings-table.ts`, `src/version.ts`).
+`src/savings.ts`, `src/savings-table.ts`, `src/version.ts`,
+`src/tui-activation.ts`).
 
 `GLOSSARY.md` names the domain terms and the module that owns each one.
 

@@ -31,6 +31,7 @@ function FusionStatus(props: {
   sessionID: string | undefined
 }) {
   const leadSession = () => {
+    void props.state.sessionsVersion
     const session = props.sessionID ? props.context.data.session.get(props.sessionID) : undefined
     return isLeadSession(props.state, props.sessionID, session?.agent)
   }
@@ -39,7 +40,7 @@ function FusionStatus(props: {
     void props.state.sessionsVersion
     const running =
       props.sessionID !== undefined && sidekickRunning(props.sessions(), props.sessionID)
-    return statusText(props.state, props.sessionID, running)
+    return statusText(props.state, props.sessionID, running, props.context.ui.model.current())
   }
   return (
     <Show when={leadSession()}>

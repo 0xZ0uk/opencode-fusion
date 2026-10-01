@@ -5,7 +5,7 @@
  * lead session at all, and what the line says. Free of host types — the caller
  * passes the session's agent in — so both are testable on plain Node.
  */
-import { describeModelName, type FusionPair } from "./pair.ts"
+import { describeModelName, type FusionPair, type ModelRef } from "./pair.ts"
 
 export type StatusLineState = {
   readonly pair: FusionPair | undefined
@@ -22,9 +22,14 @@ export function isLeadSession(state: StatusLineState, sessionID: string | undefi
  * The line itself. With no pair yet it prompts for `/fusion`; otherwise it names
  * the pair, with the running suffix when this lead's sidekick is working.
  */
-export function statusText(state: StatusLineState, sessionID: string | undefined, running: boolean): string {
+export function statusText(
+  state: StatusLineState,
+  sessionID: string | undefined,
+  running: boolean,
+  liveLead?: Pick<ModelRef, "modelID" | "variant">,
+): string {
   const pair = state.pair
   if (!pair) return "fusion · no pair (run /fusion)"
   const suffix = sessionID !== undefined && running ? " · sidekick running" : ""
-  return `fusion ${describeModelName(pair.lead)} ◆ ${describeModelName(pair.sidekick)}${suffix}`
+  return `fusion ${describeModelName(liveLead ?? pair.lead)} ◆ ${describeModelName(pair.sidekick)}${suffix}`
 }
