@@ -29,13 +29,16 @@
   },
   "devDependencies": {
     "@opencode/client": "2.0.19",
-    "@opencode/plugin": "2.0.19",
-    "@opencode/schema": "2.0.19",
     "@opencode/theme": "2.0.19",
     "@opentui/core": "0.5.12",
     "@opentui/solid": "0.5.12",
     "@types/node": "^22.10.2",
     "solid-js": "1.9.12",
     "typescript": "^5.7.2"
+  },
+  "dependencies": {
+    "@opencode/plugin": "2.0.19",
+    "effect": "4.0.0-rc.112",
+    "@opencode/schema": "2.0.19"
   }
 }

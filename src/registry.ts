@@ -16,6 +16,8 @@
  *
  * Type-only imports on purpose: no runtime dependency on `@opencode/*`.
  */
+import { Context, Effect, Semaphore } from "effect"
+import { facadeScheduler, promiseStorage, type FusionStorageService } from "./host.ts"
 
 /** Lead session -> current sidekick session. Insertion order is recency. */
 const CHILDREN_KEY = "sidekick-sessions"
@@ -49,6 +51,15 @@ export type SidekickRegistry = {
   forget(sessionID: string): Promise<boolean>
 }
 
+export interface RegistryService {
+  current(leadSessionID: string): string | undefined
+  record(leadSessionID: string, sidekickSessionID: string): Effect.Effect<void, unknown>
+  reset(leadSessionID: string): Effect.Effect<void, unknown>
+  forget(sessionID: string): Effect.Effect<boolean, unknown>
+}
+
+export class Registry extends Context.Service<Registry, RegistryService>()("opencode-fusion/Registry") {}
+
 type UnknownRecord = Record<string, unknown>
 
 const asRecord = (value: unknown): UnknownRecord | undefined =>
@@ -61,62 +72,76 @@ function normalizeChildren(value: unknown): Record<string, string> {
   return out
 }
 
-export async function createRegistry(storage: SidekickStorage): Promise<SidekickRegistry> {
-  const children = new Map<string, string>(Object.entries(normalizeChildren(await storage.get(CHILDREN_KEY))))
+export const makeRegistry = Effect.fn("makeRegistry")(function* (storage: FusionStorageService) {
+  const children = new Map<string, string>(Object.entries(normalizeChildren(yield* storage.get(CHILDREN_KEY))))
 
   // Writes are serialized on this chain. A write snapshots the map when its
   // turn comes, so a mutation queued behind an in-flight write cannot be
   // overwritten by it, and the last write to land always carries the newest
   // state.
-  let writes: Promise<void> = Promise.resolve()
+  const writes = yield* Semaphore.make(1)
 
   /**
    * Prune the map to the cap from the oldest end — synchronously, so readers
    * see the cap immediately — then queue the write.
    */
-  const persist = (): Promise<void> => {
+  const persist = (): Effect.Effect<void, unknown> => {
     while (children.size > CHILDREN_CAP) {
       const oldest = children.keys().next().value
       if (oldest === undefined) break
       children.delete(oldest)
     }
-    const write = writes.then(async () => {
-      await storage.set(CHILDREN_KEY, Object.fromEntries(children))
-    })
-    // A failed write must not poison the chain; the caller awaiting it still
-    // sees the rejection.
-    writes = write.catch(() => {})
-    return write
+    return writes.withPermits(1)(
+      // A failed write must not poison the chain; the caller awaiting it still
+      // sees the rejection.
+      Effect.suspend(() => storage.set(CHILDREN_KEY, Object.fromEntries(children))),
+    )
   }
 
   const current = (leadSessionID: string): string | undefined => children.get(leadSessionID)
 
-  const record = (leadSessionID: string, sidekickSessionID: string): Promise<void> => {
-    children.delete(leadSessionID)
-    children.set(leadSessionID, sidekickSessionID)
-    return persist()
-  }
+  const record = (leadSessionID: string, sidekickSessionID: string): Effect.Effect<void, unknown> =>
+    Effect.suspend(() => {
+      children.delete(leadSessionID)
+      children.set(leadSessionID, sidekickSessionID)
+      return persist()
+    })
 
-  const reset = (leadSessionID: string): Promise<void> => {
-    if (!children.delete(leadSessionID)) return Promise.resolve()
-    return persist()
-  }
+  const reset = (leadSessionID: string): Effect.Effect<void, unknown> =>
+    Effect.suspend(() => {
+      if (!children.delete(leadSessionID)) return Effect.void
+      return persist()
+    })
 
-  const forget = (sessionID: string): Promise<boolean> => {
-    let removed = children.delete(sessionID)
-    for (const [leadID, sidekickID] of [...children]) {
-      if (sidekickID === sessionID) {
-        children.delete(leadID)
-        removed = true
+  const forget = (sessionID: string): Effect.Effect<boolean, unknown> =>
+    Effect.suspend(() => {
+      let removed = children.delete(sessionID)
+      for (const [leadID, sidekickID] of [...children]) {
+        if (sidekickID === sessionID) {
+          children.delete(leadID)
+          removed = true
+        }
       }
-    }
-    if (!removed) return Promise.resolve(false)
-    const persisted = persist().then(() => true)
-    // Never let an ignored `forget` promise surface as an unhandled rejection;
-    // a caller awaiting `persisted` still sees the failure.
-    persisted.catch(() => {})
-    return persisted
-  }
+      if (!removed) return Effect.succeed(false)
+      return Effect.as(persist(), true)
+    })
 
   return { current, record, reset, forget }
+})
+
+export async function createRegistry(storage: SidekickStorage): Promise<SidekickRegistry> {
+  const service = await Effect.runPromise(makeRegistry(promiseStorage(storage)), { scheduler: facadeScheduler })
+  return {
+    current: (leadSessionID) => service.current(leadSessionID),
+    record: (leadSessionID, sidekickSessionID) =>
+      Effect.runPromise(service.record(leadSessionID, sidekickSessionID), { scheduler: facadeScheduler }),
+    reset: (leadSessionID) => Effect.runPromise(service.reset(leadSessionID), { scheduler: facadeScheduler }),
+    forget: (sessionID) => {
+      const persisted = Effect.runPromise(service.forget(sessionID), { scheduler: facadeScheduler })
+      // Never let an ignored `forget` promise surface as an unhandled rejection;
+      // a caller awaiting `persisted` still sees the failure.
+      persisted.catch(() => {})
+      return persisted
+    },
+  }
 }
