@@ -12,7 +12,8 @@ import type { Agent } from "@opencode/plugin"
 import type { AgentInfo } from "@opencode/client"
 import { appendFileSync } from "node:fs"
 import { LEAD_AGENT, SIDEKICK_AGENT, describeModelRef, normalizePair, type FusionPair, type ModelRef } from "./pair.ts"
-import { delegationNudge, leadSystem, SIDEKICK_SYSTEM, type Enforcement } from "./prompts.ts"
+import { SIDEKICK_SYSTEM } from "./prompts.ts"
+import { DEFAULT_SHELL_ALLOWLIST, leadPolicy, sidekickRules, type Enforcement } from "./policy.ts"
 import { versionWarning } from "./version.ts"
 import { Fusion } from "./rpc.ts"
 import { createHandoffs, type SidekickHost, type SidekickSessions } from "./handoffs.ts"
@@ -42,11 +43,6 @@ type Options = {
   readonly blockTimeoutSeconds?: number
 }
 
-type Rule = { action: string; resource: string; effect: "allow" | "deny" | "ask" }
-
-/** Commands the lead keeps: cheap verification and inspection, nothing that writes. */
-const DEFAULT_SHELL_ALLOWLIST = ["git status*", "git diff --stat*", "git diff HEAD --stat*", "git log --oneline*"]
-
 // Opt-in diagnostic trace: set FUSION_TRACE to a file path to record how far
 // the plugin gets. Off unless asked, and never allowed to break setup.
 const trace = (step: string, detail?: unknown) => {
@@ -62,56 +58,6 @@ const trace = (step: string, detail?: unknown) => {
 /** Stored values are plain JSON; our interfaces are not index-signatured. */
 const toStored = (value: unknown): StoredJson => value as StoredJson
 
-/**
- * The lead's permission layer. Last match wins, so the broad denies come first.
- * Ported from mihneaptu/opencode-fusion, which proved the shape on V1: the
- * point is that "delegates or does nothing" is mechanical, not advisory.
- */
-export function leadPermissions(
-  enforcement: Enforcement,
-  shellAllowlist: readonly string[],
-  sidekickAgent: string,
-): Rule[] {
-  if (enforcement === "off") return []
-  const permissions: Rule[] = [
-    { action: "edit", resource: "*", effect: "deny" },
-    { action: "subagent", resource: "*", effect: "deny" },
-  ]
-  // "edits" still allows the built-in subagent path to the sidekick; in "full"
-  // the persistent `sidekick` tool is the only delegation path at all.
-  if (enforcement === "edits") {
-    permissions.push({ action: "subagent", resource: sidekickAgent, effect: "allow" })
-  }
-  if (enforcement === "full") {
-    permissions.push(
-      { action: "grep", resource: "*", effect: "deny" },
-      { action: "glob", resource: "*", effect: "deny" },
-      { action: "shell", resource: "*", effect: "deny" },
-      ...shellAllowlist.map((resource) => ({ action: "shell", resource, effect: "allow" as const })),
-    )
-  }
-  return permissions
-}
-
-/** `*` is the only wildcard; everything else in the pattern is literal. */
-const wildcard = (pattern: string, value: string): boolean =>
-  new RegExp(
-    `^${pattern
-      .split("*")
-      .map((literal) => literal.replace(/[.+?^${}()|[\]\\]/g, "\\$&"))
-      .join(".*")}$`,
-    "s",
-  ).test(value)
-
-/** Last matching rule wins; undefined when nothing matches. */
-export function decide(rules: readonly Rule[], action: string, resource: string): Rule["effect"] | undefined {
-  let effect: Rule["effect"] | undefined
-  for (const rule of rules) {
-    if (wildcard(rule.action, action) && wildcard(rule.resource, resource)) effect = rule.effect
-  }
-  return effect
-}
-
 const plugin: Plugin.Plugin = {
   id: "opencode-fusion",
   async setup(ctx) {
@@ -122,7 +68,9 @@ const plugin: Plugin.Plugin = {
     const shellAllowlist = [...DEFAULT_SHELL_ALLOWLIST, ...(options.allowShell ?? [])]
     const sidekickAutoApprove = options.sidekickAutoApprove ?? true
     const blockTimeoutSeconds = options.blockTimeoutSeconds ?? 1800
-    const leadRules = leadPermissions(enforcement, shellAllowlist, sidekickAgent)
+    // One policy object drives the agent transform and the permission hook, so
+    // the rules, the lead's prompt and the call-time check cannot drift.
+    const policy = leadPolicy(enforcement, shellAllowlist, sidekickAgent)
     trace("setup:start", { enforcement })
 
     const version = versionWarning(ctx.app?.version)
@@ -156,24 +104,15 @@ const plugin: Plugin.Plugin = {
       trace("transform:visible", editor.list().map((agent) => String(agent.id)))
       editor.update(leadAgent, (lead) => {
         if (pair) lead.model = toAgentModel(pair.lead)
-        lead.system = leadSystem(enforcement, shellAllowlist)
-        lead.permissions = [...lead.permissions, ...leadRules]
+        lead.system = policy.system
+        lead.permissions = [...lead.permissions, ...policy.rules]
         sawAgents = true
       })
       editor.update(sidekickAgent, (sidekick) => {
         if (pair) sidekick.model = toAgentModel(pair.sidekick)
         sidekick.system = SIDEKICK_SYSTEM
         sidekick.mode = "subagent"
-        sidekick.permissions = [
-          ...sidekick.permissions,
-          ...(sidekickAutoApprove
-            ? [
-                { action: "edit", resource: "*", effect: "allow" as const },
-                { action: "shell", resource: "*", effect: "allow" as const },
-              ]
-            : []),
-          { action: "subagent", resource: "*", effect: "deny" as const },
-        ]
+        sidekick.permissions = [...sidekick.permissions, ...sidekickRules(sidekickAutoApprove)]
         sawAgents = true
       })
     })
@@ -339,18 +278,18 @@ const plugin: Plugin.Plugin = {
     /**
      * Backstop for the lead's permission layer. A configured `deny` is final and
      * never reaches this hook — it only runs for allow/ask decisions — so it
-     * re-checks every lead rule at call time, covering the window before the
-     * agent transform lands or a tool leaks through. It only ever tightens.
+     * re-checks the policy at call time, covering the window before the agent
+     * transform lands or a tool leaks through. It only ever tightens.
      */
     const permissions =
       enforcement === "off"
         ? undefined
         : await ctx.permission.hook("evaluate", (event) => {
             if (event.agent === undefined || String(event.agent) !== leadAgent) return
-            const resources = event.resources.length > 0 ? event.resources : [""]
-            if (!resources.some((resource) => decide(leadRules, event.action, resource) === "deny")) return
+            const denial = policy.deny(event.action, event.resources)
+            if (denial === undefined) return
             event.effect = "deny"
-            event.message = delegationNudge(event.action)
+            event.message = denial
           })
 
     trace("permissions:ready", { enforcement })

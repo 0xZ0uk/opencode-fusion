@@ -142,10 +142,12 @@ prompts and external-directory prompts are kept:
 The lead's system prompt is generated from the enforcement level — in `full` it
 lists the allowed shell commands and names the `sidekick` tool as the only
 delegate, so the model is told what it can do instead of discovering the denies.
+Prompt and rules come from the same policy module (`src/policy.ts`), so the two
+cannot disagree.
 
 `enforce: "edits"` keeps only the edit deny and the sidekick-scoped subagent
 allow; `enforce: "off"` makes everything advisory.
-A `permission.hook("evaluate")` backstop re-checks every lead rule at call time,
+A `permission.hook("evaluate")` backstop re-checks that policy at call time,
 covering the window before the agent transform lands (configured denies are final
 and never reach the hook).
 
@@ -158,8 +160,9 @@ npm run check   # tsc --noEmit + node --test
 ```
 
 Tests run on plain Node type stripping against the pure modules (`src/pair.ts`,
-`src/presets.ts`, `src/pricing.ts`, `src/version.ts`, and the exported helpers of
-`src/server.ts`). `src/status.tsx` and `src/keymap.tsx` are the only JSX files.
+`src/presets.ts`, `src/pricing.ts`, `src/version.ts`, `src/prompts.ts`,
+`src/policy.ts`, `src/handoffs.ts`, `src/registry.ts`). `src/status.tsx` and
+`src/keymap.tsx` are the only JSX files.
 
 ## Verified
 
