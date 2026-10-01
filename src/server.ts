@@ -24,7 +24,7 @@ import {
 import { SIDEKICK_SYSTEM } from "./prompts.ts"
 import { DEFAULT_SHELL_ALLOWLIST, leadPolicy, sidekickRules, type Enforcement } from "./policy.ts"
 import { versionWarning } from "./version.ts"
-import { Fusion } from "./rpc.ts"
+import { Fusion, type PairStatus, type SidekicksInput } from "./rpc.ts"
 import { createHandoffs, type SidekickHost, type SidekickSessions } from "./handoffs.ts"
 import { createRegistry, type SidekickStorage } from "./registry.ts"
 
@@ -303,28 +303,34 @@ const plugin: Plugin.Plugin = {
 
     trace("permissions:ready", { enforcement })
 
+    // The one place the `pairResult` shape is built: both setPair returns and
+    // getPair go through here, so the wire shape cannot drift between them.
+    const pairStatus = (): PairStatus => ({
+      configured: pair !== undefined,
+      ...(pair ? { pair } : {}),
+      leadAgent,
+      sidekickAgent,
+    })
+
     const rpc = await ctx.rpc.register(Fusion, {
-      getPair: async () => ({
-        configured: pair !== undefined,
-        ...(pair ? { pair } : {}),
-        leadAgent,
-        sidekickAgent,
-      }),
+      getPair: async () => pairStatus(),
       setPair: async (input) => {
         const next = normalizePair(input)
-        if (!next) return { configured: pair !== undefined, ...(pair ? { pair } : {}), leadAgent, sidekickAgent }
+        if (!next) return pairStatus()
         pair = { ...next, leadAgent, sidekickAgent }
         await ctx.storage.set(PAIR_KEY, toStored(pair))
         await ctx.agent.reload()
         await rpc.events.emit("pairChanged", { lead: pair.lead, sidekick: pair.sidekick })
-        return { configured: true, pair, leadAgent, sidekickAgent }
+        // `pair` is set by now, so the shared builder already reports it.
+        return pairStatus()
       },
       apply: async () => {
         await ctx.agent.reload()
         return { applied: true }
       },
       sidekicks: async (input) => {
-        const sessionID = String((input as { sessionID: string }).sessionID)
+        // The schema declares this input; `Rpc.Input` of a JSON Schema is `unknown`.
+        const sessionID = String((input as SidekicksInput).sessionID)
         return {
           current: registry.current(sessionID),
           sessionIDs: registry.sessions(sessionID),

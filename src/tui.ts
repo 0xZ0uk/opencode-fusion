@@ -12,7 +12,7 @@
  */
 import type { Plugin } from "@opencode/plugin/tui"
 import type { ModelInfo } from "@opencode/client"
-import { Fusion } from "./rpc.ts"
+import { Fusion, fusionClient, type PairStatus } from "./rpc.ts"
 import { LEAD_AGENT, SIDEKICK_AGENT, describeModelRef, toHostModel, type FusionPair, type ModelRef } from "./pair.ts"
 import { EMPTY_TOKENS, addTokens, money, priceMessages, tierFor, tokensOf, type Tokens } from "./pricing.ts"
 import { PRESETS, familyOf, resolvePreset } from "./presets.ts"
@@ -22,12 +22,6 @@ import { claimKeymap } from "./keymap.tsx"
 
 /** Dialog value meaning "use the model's default effort". */
 const MODEL_DEFAULT = ""
-
-/** What getPair returns; `pair` is absent until one is picked. */
-type PairStatus = { configured: boolean; pair?: FusionPair; leadAgent: string; sidekickAgent: string }
-
-/** What the `sidekicks` RPC returns for one lead session. */
-type SidekicksResult = { current?: string; sessionIDs: string[]; running: boolean }
 
 const modelKey = (ref: { providerID: string; modelID: string }): string => `${ref.providerID}|${ref.modelID}`
 
@@ -73,7 +67,7 @@ const formatTokens = (tokens: Tokens): string =>
 const plugin: Plugin.Definition = {
   id: "opencode-fusion.tui",
   async setup(context) {
-    const fusion = context.client.rpc(Fusion)
+    const fusion = fusionClient(context.client.rpc(Fusion))
 
     const warning = versionWarning(context.app?.version)
     if (warning) context.ui.toast.show({ title: "Fusion", message: warning, variant: "warning" })
@@ -102,8 +96,7 @@ const plugin: Plugin.Definition = {
 
     const loadPair = async (): Promise<PairStatus> => {
       try {
-        // RPC values come back as `unknown`: JSON Schemas do not carry TypeScript types.
-        return (await fusion.getPair({})) as PairStatus
+        return await fusion.getPair()
       } catch (error) {
         console.warn(`[fusion] server plugin unreachable: ${String(error)}`)
         return { configured: false, leadAgent: LEAD_AGENT, sidekickAgent: SIDEKICK_AGENT }
@@ -121,8 +114,7 @@ const plugin: Plugin.Definition = {
     const offPair = fusion.events.on("pairChanged", () => {
       void loadPair().then(applyStatus, () => {})
     })
-    const offHandoff = fusion.events.on("handoffChanged", (event) => {
-      const data = event.data as { leadSessionID: string; running: boolean }
+    const offHandoff = fusion.events.on("handoffChanged", (data) => {
       setState((draft) => {
         draft.running[data.leadSessionID] = data.running
       })
@@ -131,8 +123,7 @@ const plugin: Plugin.Definition = {
     const refreshRunning = (sessionID: string) => {
       void fusion
         .sidekicks({ sessionID })
-        .then((result) => {
-          const { running } = result as SidekicksResult
+        .then(({ running }) => {
           setState((draft) => {
             draft.running[sessionID] = running
           })
@@ -302,7 +293,7 @@ const plugin: Plugin.Definition = {
           catalogue(),
           context.client.session.get({ sessionID }),
         ])
-        const { sessionIDs } = sidekicks as SidekicksResult
+        const { sessionIDs } = sidekicks
         let sidekickCost = 0
         let sidekickTokens = EMPTY_TOKENS
         let sessions = 0
