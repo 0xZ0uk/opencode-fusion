@@ -14,7 +14,9 @@ import type { Plugin } from "@opencode/plugin/tui"
 import type { ModelInfo } from "@opencode/client"
 import { Fusion, fusionClient, type PairStatus } from "./rpc.ts"
 import { LEAD_AGENT, SIDEKICK_AGENT, describeModelRef, toHostModel, type FusionPair, type ModelRef } from "./pair.ts"
-import { EMPTY_TOKENS, addTokens, money, priceMessages, tierFor, tokensOf, type Tokens } from "./pricing.ts"
+import { tierFor } from "./pricing.ts"
+import { savingsReport, type SessionReader } from "./savings.ts"
+import { createModelPricing } from "./model-pricing.ts"
 import { PRESETS, familyOf, resolvePreset } from "./presets.ts"
 import { versionWarning } from "./version.ts"
 import { claimStatus } from "./status.tsx"
@@ -61,9 +63,6 @@ function effortOptions(model: ModelInfo) {
   ]
 }
 
-const formatTokens = (tokens: Tokens): string =>
-  `${tokens.input.toLocaleString()} in · ${tokens.output.toLocaleString()} out · ${tokens.reasoning.toLocaleString()} reasoning`
-
 const plugin: Plugin.Definition = {
   id: "opencode-fusion.tui",
   async setup(context) {
@@ -93,6 +92,8 @@ const plugin: Plugin.Definition = {
       const available = list.filter((model) => model.enabled !== false)
       return available.length > 0 ? available : list
     }
+
+    const leadPricing = createModelPricing(catalogue)
 
     const loadPair = async (): Promise<PairStatus> => {
       try {
@@ -281,72 +282,16 @@ const plugin: Plugin.Definition = {
           await fail("open a Fusion lead session first")
           return
         }
-        const status = await loadPair()
-        const pair = status.pair
-        if (!pair) {
-          await fail("no pair picked yet — run /fusion")
-          return
-        }
         const sessionID = route.sessionID
-        const [sidekicks, models, leadSession] = await Promise.all([
-          fusion.sidekicks({ sessionID }),
-          catalogue(),
-          context.client.session.get({ sessionID }),
-        ])
-        const { sessionIDs } = sidekicks
-        let sidekickCost = 0
-        let sidekickTokens = EMPTY_TOKENS
-        let sessions = 0
-        const perMessage: Tokens[] = []
-        for (const sidekickID of sessionIDs) {
-          let sidekickSession
-          try {
-            sidekickSession = await context.client.session.get({ sessionID: sidekickID })
-          } catch {
-            continue
-          }
-          sessions += 1
-          sidekickCost += sidekickSession.cost
-          sidekickTokens = addTokens(sidekickTokens, tokensOf(sidekickSession.tokens))
-          let cursor: string | undefined
-          do {
-            const page = await context.client.message.list({
-              sessionID: sidekickID,
-              type: "assistant",
-              limit: 100,
-              cursor,
-            })
-            for (const message of page.data) {
-              if (message.type === "assistant") perMessage.push(tokensOf(message.tokens))
-            }
-            cursor = page.cursor.next ?? undefined
-          } while (cursor)
+        const reader: SessionReader = {
+          sessionID,
+          getSession: (id) => context.client.session.get({ sessionID: id }),
+          sidekickSessions: () => fusion.sidekicks({ sessionID }).then((result) => result.sessionIDs),
+          listAssistantMessages: (id, cursor) =>
+            context.client.message.list({ sessionID: id, type: "assistant", limit: 100, cursor }),
+          leadPricing,
         }
-        const leadModel = models.find(
-          (entry) => entry.providerID === pair.lead.providerID && entry.modelID === pair.lead.modelID,
-        )
-        const costs = leadModel?.cost ?? []
-        const lines = [
-          `lead     ${describeModelRef(pair.lead)}`,
-          `         ${formatTokens(tokensOf(leadSession.tokens))} · billed ${money(leadSession.cost)}`,
-          `sidekick ${describeModelRef(pair.sidekick)} · ${sessions} session${sessions === 1 ? "" : "s"}`,
-          `         ${formatTokens(sidekickTokens)} · billed ${money(sidekickCost)}`,
-          "",
-          `total billed: ${money(leadSession.cost + sidekickCost)}`,
-        ]
-        if (costs.length > 0) {
-          const atLeadRates = priceMessages(perMessage, costs)
-          lines.push(
-            `same sidekick work at lead rates: ${money(atLeadRates)}`,
-            `estimated saving: ${money(Math.max(atLeadRates - sidekickCost, 0))}`,
-          )
-        } else {
-          lines.push("no price data for the lead model — cannot estimate the saving")
-        }
-        lines.push(
-          "",
-          "the lead-rate figure is priced per sidekick message from the catalogue (context tier per message, reasoning at output rate); billed figures are OpenCode's recorded session costs",
-        )
+        const lines = await savingsReport((await loadPair()).pair, reader)
         await context.ui.dialog.alert({ title: "Fusion savings", message: lines.join("\n") })
       } catch (error) {
         await fail(`unavailable: ${String(error)}`)
