@@ -1,6 +1,6 @@
 import { describe, it } from "node:test"
 import assert from "node:assert/strict"
-import { handoffReport } from "../src/server.ts"
+import { handoffReport } from "../src/handoffs.ts"
 
 type Transcript = Parameters<typeof handoffReport>[0]
 

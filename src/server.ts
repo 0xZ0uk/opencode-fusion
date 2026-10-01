@@ -9,13 +9,13 @@
  */
 import type { Plugin } from "@opencode/plugin"
 import type { Agent } from "@opencode/plugin"
-import type { AgentInfo, FileDiffInfo, OpenCodeEvent } from "@opencode/client"
+import type { AgentInfo } from "@opencode/client"
 import { appendFileSync } from "node:fs"
-import { randomUUID } from "node:crypto"
 import { LEAD_AGENT, SIDEKICK_AGENT, describeModelRef, normalizePair, type FusionPair, type ModelRef } from "./pair.ts"
 import { delegationNudge, leadSystem, SIDEKICK_SYSTEM, type Enforcement } from "./prompts.ts"
 import { versionWarning } from "./version.ts"
 import { Fusion } from "./rpc.ts"
+import { createHandoffs, type SidekickHost, type SidekickSessions } from "./handoffs.ts"
 
 const PAIR_KEY = "pair"
 const CHILDREN_KEY = "sidekick-sessions"
@@ -27,8 +27,6 @@ const CHILDREN_CAP = 200
 type AgentModel = NonNullable<Agent.Info["model"]>
 type StoredJson = Parameters<Plugin.Context["storage"]["set"]>[1]
 type UnknownRecord = Record<string, unknown>
-type Transcript = Awaited<ReturnType<Plugin.Context["session"]["context"]>>
-type StepEnded = Extract<OpenCodeEvent, { type: "session.step.ended" }>["data"]
 
 type Options = {
   readonly enforce?: Enforcement
@@ -122,57 +120,6 @@ export function decide(rules: readonly Rule[], action: string, resource: string)
   return effect
 }
 
-/** Text of the last non-empty assistant message in `messages[from..to)`. */
-function lastAssistantText(messages: Transcript, from: number, to: number): string {
-  for (let index = to - 1; index >= from; index -= 1) {
-    const message = messages[index]
-    if (message.type !== "assistant") continue
-    const text = message.content
-      .map((part) => (part.type === "text" ? part.text : ""))
-      .filter(Boolean)
-      .join("\n\n")
-      .trim()
-    if (text) return text
-  }
-  return ""
-}
-
-/**
- * Slice one handoff's report out of the sidekick transcript: the user message
- * carrying the handoff marker (or the prompt's inbox id) starts the slice, the
- * next user message ends it. Falls back to the last assistant text overall —
- * the pre-marker behaviour — when the marker is not in the transcript.
- */
-export function handoffReport(
-  messages: Transcript,
-  handoffID: string,
-  inboxID: string | undefined,
-): { text: string; files: string[]; matched: boolean } {
-  const start = messages.findIndex(
-    (message) => message.type === "user" && (message.metadata?.fusionHandoff === handoffID || message.id === inboxID),
-  )
-  if (start < 0) return { text: lastAssistantText(messages, 0, messages.length), files: [], matched: false }
-  let end = messages.length
-  for (let index = start + 1; index < messages.length; index += 1) {
-    if (messages[index].type === "user") {
-      end = index
-      break
-    }
-  }
-  const seen = new Set<string>()
-  const files: string[] = []
-  for (let index = start + 1; index < end; index += 1) {
-    const message = messages[index]
-    if (message.type !== "assistant") continue
-    for (const file of message.snapshot?.files ?? []) {
-      if (seen.has(file)) continue
-      seen.add(file)
-      files.push(file)
-    }
-  }
-  return { text: lastAssistantText(messages, start + 1, end), files, matched: true }
-}
-
 function normalizeChildren(value: unknown): Record<string, string> {
   const record = asRecord(value) ?? {}
   const out: Record<string, string> = {}
@@ -240,26 +187,6 @@ const plugin: Plugin.Plugin = {
       await ctx.storage.set(CHILDREN_KEY, toStored(Object.fromEntries(children)))
       await ctx.storage.set(SIDEKICK_HISTORY_KEY, toStored(Object.fromEntries(history)))
     }
-
-    // In-flight handoffs: lead session -> handoff id -> record. Process-local;
-    // a restart loses them, which `status` says out loud.
-    type Handoff = { sessionID: string; inboxID?: string; started: number; block: boolean; cancelled?: boolean }
-    const active = new Map<string, Map<string, Handoff>>()
-
-    // Assigned once the RPC registration lands; a no-op before that.
-    let emitHandoff: (leadSessionID: string, sidekickSessionID: string, running: boolean) => void = () => {}
-
-    const dropHandoff = (leadSessionID: string, handoffID: string) => {
-      const handoffs = active.get(leadSessionID)
-      if (!handoffs) return
-      const sidekickSessionID = handoffs.get(handoffID)?.sessionID
-      handoffs.delete(handoffID)
-      if (handoffs.size === 0) active.delete(leadSessionID)
-      if (sidekickSessionID) emitHandoff(leadSessionID, sidekickSessionID, handoffs.size > 0)
-    }
-
-    // `session.step.ended` events fanned out per sidekick session, for progress.
-    const stepListeners = new Map<string, Set<(data: StepEnded) => void>>()
 
     const toAgentModel = (ref: ModelRef): AgentModel =>
       ({ id: ref.modelID, providerID: ref.providerID, ...(ref.variant ? { variant: ref.variant } : {}) }) as AgentModel
@@ -371,62 +298,30 @@ const plugin: Plugin.Plugin = {
       return id
     }
 
-    /**
-     * Report text, then the changed-file list. Per-file +A/−D stats come from
-     * the working-tree diff when the checkout offers one; the file paths stand
-     * alone otherwise.
-     */
-    const formatReport = async (
-      sessionID: string,
-      report: { text: string; files: string[]; matched: boolean },
-    ): Promise<string> => {
-      let stats: Map<string, FileDiffInfo> | undefined
-      try {
-        const diff = await ctx.vcs.diff({ mode: "working" })
-        stats = new Map(diff.data.map((entry) => [entry.file, entry]))
-      } catch {
-        /* per-file stats are best-effort */
-      }
-      const lines = [report.text || "finished with no text report", ""]
-      if (report.files.length === 0) {
-        lines.push("Changed files: none recorded")
-      } else {
-        lines.push("Changed files:")
-        for (const file of report.files) {
-          const entry = stats?.get(file)
-          lines.push(entry ? `${file} (+${entry.additions} −${entry.deletions} working tree)` : file)
-        }
-      }
-      if (!report.matched) {
-        lines.push("(report matched by recency, not by handoff — may belong to another handoff)")
-      }
-      lines.push("", `sidekick session: ${sessionID}`)
-      return lines.join("\n")
+    // Seams the Handoff lifecycle module is built on: the host calls go to
+    // `ctx`, the registry stays here (recommendation B replaces it behind the
+    // same interface).
+    const host: SidekickHost = {
+      prompt: (input) => ctx.session.prompt({ sessionID: input.sessionID, text: input.text, metadata: input.metadata }),
+      wait: (sessionID, waitOptions) => ctx.session.wait({ sessionID }, { signal: waitOptions?.signal }),
+      context: (sessionID) => ctx.session.context({ sessionID }),
+      interrupt: (sessionID) => ctx.session.interrupt({ sessionID }),
+      synthetic: async (input) => {
+        await ctx.session.synthetic({ sessionID: input.sessionID, text: input.text, resume: input.resume })
+      },
+      workingDiff: async () => (await ctx.vcs.diff({ mode: "working" })).data,
     }
 
-    /** Wait out a background handoff, then post the report into the lead session. */
-    const finishInBackground = (leadSessionID: string, handoffID: string) => {
-      const handoff = active.get(leadSessionID)?.get(handoffID)
-      if (!handoff) return
-      const sessionID = handoff.sessionID
-      void (async () => {
-        try {
-          await ctx.session.wait({ sessionID })
-          if (handoff.cancelled) return
-          const report = handoffReport(await ctx.session.context({ sessionID }), handoffID, handoff.inboxID)
-          const text = await formatReport(sessionID, report)
-          await ctx.session.synthetic({
-            sessionID: leadSessionID,
-            text: `<sidekick_report session="${sessionID}" handoff="${handoffID}">\n${text}\n</sidekick_report>`,
-            resume: true,
-          })
-        } catch (error) {
-          console.warn(`[fusion] sidekick background report failed: ${String(error)}`)
-        } finally {
-          dropHandoff(leadSessionID, handoffID)
-        }
-      })()
+    const sessions: SidekickSessions = {
+      ensure: (leadSessionID) => ensureSidekickSession(leadSessionID),
+      current: (leadSessionID) => children.get(leadSessionID),
+      forget: (leadSessionID) => {
+        children.delete(leadSessionID)
+        void persistChildren()
+      },
     }
+
+    const handoffs = createHandoffs({ host, sessions, blockTimeoutSeconds })
 
     const tools = await ctx.tool.transform((editor) => {
       editor.namespace({ name: "fusion", description: "Fusion lead + sidekick pairing" })
@@ -463,55 +358,11 @@ const plugin: Plugin.Plugin = {
           const leadSessionID = String(context.sessionID)
           const action = args.action === "status" || args.action === "cancel" ? args.action : "delegate"
 
-          if (action === "status") {
-            const running = [...(active.get(leadSessionID)?.entries() ?? [])].map(
-              ([id, handoff]) =>
-                `${id.slice(0, 8)} · ${handoff.block ? "foreground" : "background"} · ${Math.round((Date.now() - handoff.started) / 1000)}s`,
-            )
-            return {
-              content: [
-                running.length > 0 ? `handoffs in flight:\n${running.join("\n")}` : "no handoff in flight",
-                `sidekick session: ${children.get(leadSessionID) ?? "none"}`,
-                "(only handoffs started by this process are listed)",
-              ].join("\n"),
-            }
-          }
-
-          if (action === "cancel") {
-            const sessionID = children.get(leadSessionID)
-            if (!sessionID) return { content: "sidekick: no sidekick session" }
-            const handoffs = [...(active.get(leadSessionID)?.entries() ?? [])]
-            for (const [, handoff] of handoffs) handoff.cancelled = true
-            const { interrupted } = await ctx.session.interrupt({ sessionID })
-            return {
-              content:
-                `sidekick: cancelled ${handoffs.length > 0 ? handoffs.map(([id]) => id.slice(0, 8)).join(", ") : "nothing in flight"}` +
-                ` (interrupted=${interrupted})`,
-            }
-          }
+          if (action === "status") return { content: handoffs.status(leadSessionID) }
+          if (action === "cancel") return { content: await handoffs.cancel(leadSessionID) }
 
           const message = typeof args.message === "string" ? args.message : ""
           if (!message) return { content: "sidekick: `message` is required for action \"delegate\"" }
-          if (args.reset === true) {
-            children.delete(leadSessionID)
-            await persistChildren()
-          }
-          const sessionID = await ensureSidekickSession(leadSessionID)
-          const handoffID = randomUUID()
-          const inbox = await ctx.session.prompt({
-            sessionID,
-            text: message,
-            metadata: { fusionHandoff: handoffID, fusionLeadSession: leadSessionID },
-          })
-          const block = args.block !== false
-          let handoffs = active.get(leadSessionID)
-          if (!handoffs) {
-            handoffs = new Map()
-            active.set(leadSessionID, handoffs)
-          }
-          handoffs.set(handoffID, { sessionID, inboxID: String(inbox.id), started: Date.now(), block })
-          emitHandoff(leadSessionID, sessionID, true)
-
           const progress = async (update: Record<string, unknown>) => {
             try {
               await context.progress(update)
@@ -519,81 +370,14 @@ const plugin: Plugin.Plugin = {
               /* progress is cosmetic */
             }
           }
-          await progress({ sessionID, title: "sidekick running", status: "running" })
-
-          if (!block) {
-            finishInBackground(leadSessionID, handoffID)
-            return {
-              content: `sidekick started in session ${sessionID} (handoff ${handoffID.slice(0, 8)}); its report will arrive as a follow-up message.`,
-              metadata: { sessionID, handoffID },
-            }
-          }
-
-          let steps = 0
-          const stepFiles: string[] = []
-          const onStep = (data: StepEnded) => {
-            steps += 1
-            for (const file of data.files ?? []) {
-              if (!stepFiles.includes(file)) stepFiles.push(file)
-            }
-            void progress({ sessionID, title: `sidekick · step ${steps}`, status: "running", steps, files: [...stepFiles] })
-          }
-          let listeners = stepListeners.get(sessionID)
-          if (!listeners) {
-            listeners = new Set()
-            stepListeners.set(sessionID, listeners)
-          }
-          listeners.add(onStep)
-          try {
-            const signal = AbortSignal.any([context.signal, AbortSignal.timeout(blockTimeoutSeconds * 1000)])
-            const tripped = new Promise<void>((resolve) => {
-              if (signal.aborted) resolve()
-              else signal.addEventListener("abort", () => resolve(), { once: true })
-            })
-            let done = false
-            try {
-              // The signal is also raced, not only passed: a host that ignores
-              // request signals must not hang the lead's turn forever.
-              await Promise.race([
-                ctx.session.wait({ sessionID }, { signal }).then(() => {
-                  done = true
-                }),
-                tripped,
-              ])
-            } catch (error) {
-              if (!signal.aborted) throw error
-            }
-            if (context.signal.aborted) {
-              try {
-                await ctx.session.interrupt({ sessionID })
-              } catch {
-                /* interrupting is best-effort */
-              }
-              dropHandoff(leadSessionID, handoffID)
-              return {
-                content: "sidekick: cancelled — the lead's turn was aborted; the sidekick was interrupted.",
-                metadata: { sessionID, handoffID },
-              }
-            }
-            if (!done) {
-              const handoff = handoffs.get(handoffID)
-              if (handoff) handoff.block = false
-              finishInBackground(leadSessionID, handoffID)
-              return {
-                content: `sidekick: still running after ${blockTimeoutSeconds}s; detached to the background — its report will arrive as a follow-up message. Use action "status"/"cancel" to manage it.`,
-                metadata: { sessionID, handoffID },
-              }
-            }
-            const report = handoffReport(await ctx.session.context({ sessionID }), handoffID, handoffs.get(handoffID)?.inboxID)
-            dropHandoff(leadSessionID, handoffID)
-            return {
-              content: await formatReport(sessionID, report),
-              metadata: { sessionID, handoffID, files: report.files },
-            }
-          } finally {
-            listeners.delete(onStep)
-            if (listeners.size === 0) stepListeners.delete(sessionID)
-          }
+          return handoffs.delegate({
+            leadSessionID,
+            message,
+            block: args.block !== false,
+            reset: args.reset === true,
+            signal: context.signal,
+            progress,
+          })
         },
       })
     })
@@ -646,13 +430,13 @@ const plugin: Plugin.Plugin = {
         return {
           current,
           sessionIDs: current && !recorded.includes(current) ? [...recorded, current] : recorded,
-          running: (active.get(sessionID)?.size ?? 0) > 0,
+          running: handoffs.running(sessionID),
         }
       },
     })
-    emitHandoff = (leadSessionID, sidekickSessionID, running) => {
-      void rpc.events.emit("handoffChanged", { leadSessionID, sidekickSessionID, running }).catch(() => {})
-    }
+    handoffs.setEmitter((event) => {
+      void rpc.events.emit("handoffChanged", event).catch(() => {})
+    })
 
     // Late pass for the cold-start ordering problem above: config agents are
     // registered after setup, and only a reload replays our transform.
@@ -684,8 +468,7 @@ const plugin: Plugin.Plugin = {
             }
             if (removed) void persistChildren()
           } else if (event.type === "session.step.ended") {
-            const listeners = stepListeners.get(String(event.data.sessionID))
-            if (listeners) for (const listener of listeners) listener(event.data)
+            handoffs.onStep(String(event.data.sessionID), event.data)
           }
         }
       } catch {
