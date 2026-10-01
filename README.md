@@ -162,9 +162,10 @@ npm run check   # tsc --noEmit + node --test
 ```
 
 Tests run on plain Node type stripping against the pure modules (`src/pair.ts`,
-`src/presets.ts`, `src/policy.ts`, `src/prompts.ts`, `src/handoffs.ts`,
-`src/registry.ts`, `src/sidekick-sessions.ts`, `src/sidekick-state.ts`,
-`src/pricing.ts`, `src/model-pricing.ts`, `src/savings.ts`, `src/version.ts`).
+`src/presets.ts`, `src/pairing.ts`, `src/statusline.ts`, `src/policy.ts`,
+`src/prompts.ts`, `src/handoffs.ts`, `src/registry.ts`,
+`src/sidekick-sessions.ts`, `src/sidekick-state.ts`, `src/pricing.ts`,
+`src/model-pricing.ts`, `src/savings.ts`, `src/version.ts`).
 `src/status.tsx` and `src/keymap.tsx` are the only JSX files.
 
 `GLOSSARY.md` names the domain terms and the module that owns each one.

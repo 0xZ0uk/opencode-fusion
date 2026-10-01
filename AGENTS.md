@@ -3,10 +3,10 @@
 Devin-Fusion-style lead + sidekick model pairing for OpenCode V2: a server
 plugin (`src/server.ts`), a TUI plugin (`src/tui.ts` + `src/status.tsx` +
 `src/keymap.tsx`), a shared RPC contract (`src/rpc.ts`), and helper modules
-(`src/pair.ts`, `src/presets.ts`, `src/policy.ts`, `src/prompts.ts`,
-`src/handoffs.ts`, `src/registry.ts`, `src/sidekick-sessions.ts`,
-`src/sidekick-state.ts`, `src/pricing.ts`, `src/model-pricing.ts`,
-`src/savings.ts`, `src/version.ts`).
+(`src/pair.ts`, `src/presets.ts`, `src/pairing.ts`, `src/statusline.ts`,
+`src/policy.ts`, `src/prompts.ts`, `src/handoffs.ts`, `src/registry.ts`,
+`src/sidekick-sessions.ts`, `src/sidekick-state.ts`, `src/pricing.ts`,
+`src/model-pricing.ts`, `src/savings.ts`, `src/version.ts`).
 
 `GLOSSARY.md` names the domain terms and the module that owns each one.
 
@@ -28,8 +28,8 @@ bundler, no JSX transform. Consequences:
   load without the host's runtime).
 - `src/status.tsx` and `src/keymap.tsx` are the only JSX files; neither is
   imported by tests. Keep logic out of them — anything worth testing belongs in
-  a `.ts` module. The status sentence's predicate and text are the one piece
-  still in JSX, pending the statusline module.
+  a `.ts` module. Both now hold wiring only: the status sentence's predicate and
+  text live in `src/statusline.ts`, the `/fusion` walk in `src/pairing.ts`.
 - `src/sidekick-state.ts` takes structural session types and imports nothing, so
   the TUI can hand it the host's own `SessionInfo[]` with no adapter type.
 - Test files import sources with explicit `.ts` extensions

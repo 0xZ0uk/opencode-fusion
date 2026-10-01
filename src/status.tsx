@@ -7,12 +7,10 @@
  */
 import type { Plugin } from "@opencode/plugin/tui"
 import { Show } from "solid-js"
-import { describeModelName, type FusionPair } from "./pair.ts"
 import { sidekickRunning, type SidekickSession } from "./sidekick-state.ts"
+import { isLeadSession, statusText, type StatusLineState } from "./statusline.ts"
 
-export type FusionStatusState = {
-  pair: FusionPair | undefined
-  leadAgent: string
+export type FusionStatusState = StatusLineState & {
   /**
    * Bumped by the TUI plugin on every session event. `data.session.*` is not a
    * reactive read, so this is what pulls a fresh host snapshot into the render.
@@ -32,16 +30,16 @@ function FusionStatus(props: {
   sessions: () => readonly SidekickSession[]
   sessionID: string | undefined
 }) {
-  const leadSession = () =>
-    Boolean(props.sessionID) && props.context.data.session.get(props.sessionID as string)?.agent === props.state.leadAgent
+  const leadSession = () => {
+    const session = props.sessionID ? props.context.data.session.get(props.sessionID) : undefined
+    return isLeadSession(props.state, props.sessionID, session?.agent)
+  }
   const text = () => {
-    const pair = props.state.pair
-    if (!pair) return "fusion · no pair (run /fusion)"
     // Read the revision so the sentence re-derives when the host's sessions change.
     void props.state.sessionsVersion
     const running =
-      props.sessionID && sidekickRunning(props.sessions(), props.sessionID) ? " · sidekick running" : ""
-    return `fusion ${describeModelName(pair.lead)} → ${describeModelName(pair.sidekick)}${running}`
+      props.sessionID !== undefined && sidekickRunning(props.sessions(), props.sessionID)
+    return statusText(props.state, props.sessionID, running)
   }
   return (
     <Show when={leadSession()}>

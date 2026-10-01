@@ -2,8 +2,8 @@
  * Model families and subscription presets for the `/fusion` picker.
  *
  * Pure module: type-only imports, so it loads under plain Node for tests.
+ * The wizard walk itself lives in pairing.ts; this is the table it consults.
  */
-import type { ModelInfo } from "@opencode/client"
 
 /**
  * Model family, for the cross-vendor check. A lead and sidekick from the same
@@ -68,12 +68,21 @@ export const PRESETS: readonly Preset[] = [
   },
 ]
 
-/** First candidate (in list order) present on the preset's provider, else undefined. */
-export function resolvePreset(
-  models: readonly ModelInfo[],
+/** The one thing a preset lookup needs from a model: its provider and id. */
+export type PresetModel = { readonly providerID: string; readonly modelID: string }
+
+/**
+ * First candidate (in list order) present on the preset's provider, else
+ * undefined. Generic in the caller's model shape, so each caller keeps its own
+ * type: the wizard needs `name` for its row labels and the effort titles, which
+ * `PresetModel` alone does not carry, while the TUI passes the host's
+ * `ModelInfo`.
+ */
+export function resolvePreset<Model extends PresetModel>(
+  models: readonly Model[],
   preset: Preset,
   role: "lead" | "sidekick",
-): ModelInfo | undefined {
+): Model | undefined {
   if (!preset.providerID) return undefined
   for (const candidate of preset[role]) {
     const found = models.find((model) => model.providerID === preset.providerID && model.modelID === candidate)
