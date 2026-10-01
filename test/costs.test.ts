@@ -1,9 +1,119 @@
 import { describe, it } from "node:test"
 import assert from "node:assert/strict"
 import type { ModelCost, ModelInfo } from "@opencode/client"
-import { createModelPricing, modelsDevCosts } from "../src/model-pricing.ts"
-import { priceMessages, tokensOf } from "../src/pricing.ts"
+import {
+  contextOf,
+  createCosts,
+  describeRates,
+  modelsDevCosts,
+  priceMessages,
+  pricedAt,
+  sourceOf,
+  tierFor,
+  tokensOf,
+  type Tokens,
+} from "../src/costs.ts"
 import type { ModelRef } from "../src/pair.ts"
+
+const BASE: ModelCost = { input: 10, output: 20, cache: { read: 1, write: 5 } }
+const LARGE: ModelCost = { tier: { type: "context", size: 100_000 }, input: 20, output: 40, cache: { read: 2, write: 10 } }
+const XLARGE: ModelCost = { tier: { type: "context", size: 500_000 }, input: 30, output: 60, cache: { read: 3, write: 15 } }
+const COSTS = [BASE, LARGE, XLARGE]
+
+describe("tierFor", () => {
+  it("uses the base tier under the threshold", () => {
+    assert.equal(tierFor(COSTS, 50_000), BASE)
+    assert.equal(tierFor(COSTS, 0), BASE)
+    assert.equal(tierFor(COSTS, 100_000), BASE)
+  })
+
+  it("picks the largest applicable context tier", () => {
+    assert.equal(tierFor(COSTS, 100_001), LARGE)
+    assert.equal(tierFor(COSTS, 600_000), XLARGE)
+  })
+
+  it("returns undefined for an empty rate card", () => {
+    assert.equal(tierFor([], 0), undefined)
+  })
+
+  it("returns costs[0] when nothing is untiered and no tier applies", () => {
+    assert.equal(tierFor([LARGE], 10), LARGE)
+  })
+})
+
+describe("pricedAt", () => {
+  const tokens: Tokens = { input: 1_000_000, output: 500_000, reasoning: 500_000, cacheRead: 2_000_000, cacheWrite: 0 }
+
+  it("charges reasoning at the output rate and uses cache rates", () => {
+    // 1M in @10 + (0.5M out + 0.5M reasoning) @20 + 2M cacheRead @1 + 0 @5
+    assert.equal(pricedAt(tokens, BASE), 10 + 20 + 2)
+  })
+
+  it("returns 0 for an undefined rate", () => {
+    assert.equal(pricedAt(tokens, undefined), 0)
+  })
+})
+
+describe("priceMessages", () => {
+  it("prices each message at the tier its own context selects", () => {
+    const small: Tokens = { input: 50_000, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 }
+    const big: Tokens = { input: 600_000, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 }
+    // small context 50k at BASE: $0.50; big context 600k at XLARGE: 600k @30 = $18
+    assert.equal(priceMessages([small, big], COSTS), 18.5)
+  })
+})
+
+describe("contextOf / tokensOf", () => {
+  it("counts input plus both cache buckets as context", () => {
+    assert.equal(contextOf({ input: 10, output: 99, reasoning: 99, cacheRead: 5, cacheWrite: 3 }), 18)
+  })
+
+  it("reads TokenUsageInfo defensively", () => {
+    assert.deepEqual(tokensOf(undefined), { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 })
+    assert.deepEqual(tokensOf({ input: 1, output: 2, reasoning: 3, cache: { read: 4, write: 5 } }), {
+      input: 1,
+      output: 2,
+      reasoning: 3,
+      cacheRead: 4,
+      cacheWrite: 5,
+    })
+  })
+})
+
+describe("describeRates", () => {
+  it("spells out the untiered rates with the cache line", () => {
+    assert.equal(
+      describeRates([{ input: 2.5, output: 10, cache: { read: 0.25, write: 3.75 } }]),
+      "$2.5/M in · $10/M out · cache $0.25/$3.75",
+    )
+  })
+
+  it("omits the cache line when the rate has none", () => {
+    // ModelCost declares cache, but the guard in describeRates covers payloads that omit it.
+    assert.equal(describeRates([{ input: 1, output: 2 } as ModelCost]), "$1/M in · $2/M out")
+  })
+
+  it("counts context tiers alongside the untiered rate", () => {
+    assert.equal(describeRates(COSTS), "$10/M in · $20/M out · cache $1/$5 · +2 context tiers")
+  })
+
+  it("says no price data when there is no rate at all", () => {
+    assert.equal(describeRates(undefined), "no price data")
+    assert.equal(describeRates([]), "no price data")
+  })
+})
+
+describe("sourceOf", () => {
+  it("keeps the card's own source label", () => {
+    assert.equal(sourceOf({ costs: [], source: "models.dev" }), "models.dev")
+    assert.equal(sourceOf({ costs: COSTS, source: "OpenCode catalogue" }), "OpenCode catalogue")
+  })
+
+  it("defaults to the OpenCode catalogue", () => {
+    assert.equal(sourceOf({ costs: [] }), "OpenCode catalogue")
+    assert.equal(sourceOf({ costs: COSTS }), "OpenCode catalogue")
+  })
+})
 
 const REF: ModelRef = { providerID: "prov", modelID: "mod" }
 
@@ -200,12 +310,12 @@ const catalogueOf = (cost: ModelCost[] = []) => async (): Promise<Pick<ModelInfo
   { providerID: "prov", modelID: "mod", cost },
 ]
 
-describe("createModelPricing", () => {
+describe("createCosts", () => {
   const CATALOGUE_COST: ModelCost = { input: 1, output: 2, cache: { read: 0, write: 0 } }
 
   it("prefers the OpenCode catalogue without loading externally", async () => {
     let loads = 0
-    const resolve = createModelPricing(catalogueOf([CATALOGUE_COST]), async () => {
+    const resolve = createCosts(catalogueOf([CATALOGUE_COST]), async () => {
       loads += 1
       return devData({ input: 9, output: 9 })
     })
@@ -217,7 +327,7 @@ describe("createModelPricing", () => {
   it("treats an all-zero OpenCode rate card as authoritative", async () => {
     let loads = 0
     const zero: ModelCost = { input: 0, output: 0, cache: { read: 0, write: 0 } }
-    const resolve = createModelPricing(catalogueOf([zero]), async () => {
+    const resolve = createCosts(catalogueOf([zero]), async () => {
       loads += 1
       return devData({ input: 9, output: 9 })
     })
@@ -228,16 +338,16 @@ describe("createModelPricing", () => {
   })
 
   it("falls back to models.dev when the catalogue cost is missing or empty", async () => {
-    const empty = createModelPricing(catalogueOf([]), async () => devData({ input: 3, output: 6 }))
+    const empty = createCosts(catalogueOf([]), async () => devData({ input: 3, output: 6 }))
     const pricing = await empty(REF)
     assert.equal(pricing.source, "models.dev")
     assert.deepEqual(pricing.costs, [{ input: 3, output: 6, cache: { read: 0, write: 0 } }])
-    const absent = createModelPricing(async () => [], async () => devData({ input: 3, output: 6 }))
+    const absent = createCosts(async () => [], async () => devData({ input: 3, output: 6 }))
     assert.equal((await absent(REF)).source, "models.dev")
   })
 
   it("propagates catalogue failures", async () => {
-    const resolve = createModelPricing(
+    const resolve = createCosts(
       async () => {
         throw new Error("sync down")
       },
@@ -248,7 +358,7 @@ describe("createModelPricing", () => {
 
   it("deduplicates concurrent loads and caches for the TTL", async () => {
     let loads = 0
-    const resolve = createModelPricing(catalogueOf(undefined), async () => {
+    const resolve = createCosts(catalogueOf(undefined), async () => {
       loads += 1
       return devData({ input: 3, output: 6 })
     })
@@ -265,7 +375,7 @@ describe("createModelPricing", () => {
     const realNow = Date.now
     try {
       Date.now = () => 1_000_000
-      const resolve = createModelPricing(catalogueOf(undefined), async () => {
+      const resolve = createCosts(catalogueOf(undefined), async () => {
         loads += 1
         return devData({ input: 3, output: 6 })
       })
@@ -283,7 +393,7 @@ describe("createModelPricing", () => {
 
   it("returns empty costs on load failure and retries next time", async () => {
     let loads = 0
-    const resolve = createModelPricing(catalogueOf(undefined), async () => {
+    const resolve = createCosts(catalogueOf(undefined), async () => {
       loads += 1
       if (loads === 1) throw new Error("offline")
       return devData({ input: 3, output: 6 })
@@ -296,15 +406,16 @@ describe("createModelPricing", () => {
   })
 
   it("returns empty costs for a malformed payload", async () => {
-    const resolve = createModelPricing(catalogueOf(undefined), async () => "not json data")
+    const resolve = createCosts(catalogueOf(undefined), async () => "not json data")
     assert.deepEqual(await resolve(REF), { costs: [], source: "models.dev" })
   })
 
   it("returns empty costs when models.dev lacks the model", async () => {
-    const resolve = createModelPricing(catalogueOf(undefined), async () => devData({ input: 3, output: 6 }, "other"))
+    const resolve = createCosts(catalogueOf(undefined), async () => devData({ input: 3, output: 6 }, "other"))
     assert.deepEqual((await resolve(REF)).costs, [])
   })
 })
+
 describe("default models.dev loader", () => {
   it("requests the exact endpoint with an AbortSignal and no body", async (t) => {
     const calls: { url: unknown; init: unknown }[] = []
@@ -312,7 +423,7 @@ describe("default models.dev loader", () => {
       calls.push({ url, init })
       return { ok: true, json: async () => devData({ input: 3, output: 6 }) } as Response
     })
-    const resolve = createModelPricing(async () => [])
+    const resolve = createCosts(async () => [])
     const pricing = await resolve(REF)
     assert.equal(calls.length, 1)
     assert.equal(calls[0]?.url, "https://models.dev/api.json?type=all")
@@ -338,7 +449,7 @@ describe("default models.dev loader", () => {
         },
       } as Response
     })
-    const resolve = createModelPricing(async () => [])
+    const resolve = createCosts(async () => [])
     assert.deepEqual(await resolve(REF), { costs: [] })
     assert.equal(jsonCalls, 0)
   })
@@ -355,7 +466,7 @@ describe("default models.dev loader", () => {
         },
       } as Response
     })
-    const resolve = createModelPricing(async () => [])
+    const resolve = createCosts(async () => [])
     assert.deepEqual((await resolve(REF)).costs, [])
     assert.deepEqual((await resolve(REF)).costs, [
       { input: 3, output: 6, cache: { read: 0, write: 0 } },
