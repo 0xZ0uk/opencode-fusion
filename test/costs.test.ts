@@ -306,8 +306,8 @@ const usage = (input: number, output = 0, reasoning = 0, read = 0, write = 0) =>
   cache: { read, write },
 })
 
-const catalogueOf = (cost: ModelCost[] = []) => async (): Promise<Pick<ModelInfo, "providerID" | "modelID" | "cost">[]> => [
-  { providerID: "prov", modelID: "mod", cost },
+const catalogueOf = (cost: ModelCost[] = []) => async (): Promise<Pick<ModelInfo, "providerID" | "id" | "cost">[]> => [
+  { providerID: "prov", id: "mod", cost },
 ]
 
 describe("createCosts", () => {
@@ -334,6 +334,25 @@ describe("createCosts", () => {
     const pricing = await resolve(REF)
     assert.deepEqual(pricing.costs, [zero])
     assert.equal(pricing.source, "OpenCode catalogue")
+    assert.equal(loads, 0)
+  })
+
+  it("matches rate cards by the host id, not a shared upstream modelID", async () => {
+    const base: ModelCost = { input: 1, output: 2, cache: { read: 0, write: 0 } }
+    const fast: ModelCost = { input: 4, output: 8, cache: { read: 0, write: 0 } }
+    let loads = 0
+    const resolve = createCosts(
+      async () => [
+        { providerID: "prov", id: "mod", modelID: "upstream", cost: [base] },
+        { providerID: "prov", id: "mod-fast", modelID: "upstream", cost: [fast] },
+      ],
+      async () => {
+        loads += 1
+        return devData({ input: 9, output: 9 })
+      },
+    )
+    const pricing = await resolve({ providerID: "prov", modelID: "mod-fast" })
+    assert.deepEqual(pricing, { costs: [fast], source: "OpenCode catalogue" })
     assert.equal(loads, 0)
   })
 

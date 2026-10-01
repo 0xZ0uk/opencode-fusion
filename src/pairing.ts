@@ -14,7 +14,7 @@
  * Host calls arrive as two structural seams — `Dialogs` and `Catalogue` — so
  * the walk can be driven by fakes. Only type imports from `@opencode/*`.
  */
-import type { ModelCost } from "@opencode/client"
+import type { ModelCost, ModelInfo } from "@opencode/client"
 import { PRESETS, familyOf, resolvePreset, type PresetModel } from "./presets.ts"
 import { describeRates } from "./costs.ts"
 import type { ModelRef } from "./pair.ts"
@@ -49,6 +49,18 @@ export type WizardModel = PresetModel & {
   readonly limit?: { readonly context?: number } | undefined
   readonly variants?: readonly { readonly id: string }[] | undefined
 }
+
+/** The host's model, mapped to the structural shape the wizard seam reads. */
+export const toWizardModel = (
+  model: Pick<ModelInfo, "id" | "providerID" | "name" | "cost" | "limit" | "variants">,
+): WizardModel => ({
+  providerID: model.providerID,
+  modelID: model.id,
+  name: model.name,
+  cost: model.cost,
+  limit: model.limit,
+  variants: model.variants,
+})
 
 export type Catalogue = {
   /** The models available at this location, already synced. */

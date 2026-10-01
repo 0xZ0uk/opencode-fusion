@@ -19,22 +19,12 @@ import { collectSavings, type SessionReader } from "./savings.ts"
 import { savingsTable } from "./savings-table.ts"
 import { showSavingsDialog } from "./savings-dialog.tsx"
 import { createCosts } from "./costs.ts"
-import { createPairing, type Catalogue, type Dialogs, type WizardModel } from "./pairing.ts"
+import { createPairing, toWizardModel, type Catalogue, type Dialogs } from "./pairing.ts"
 import { sidekickSessions, type SidekickSession } from "./sidekick-state.ts"
 import { versionWarning } from "./version.ts"
 import { claimStatus } from "./status.tsx"
 import { claimKeymap } from "./keymap.tsx"
 import { withTuiRuntime } from "./tui-runtime.ts"
-
-/** The host's model, mapped to the structural shape the wizard seam reads. */
-const toWizardModel = (model: ModelInfo): WizardModel => ({
-  providerID: model.providerID,
-  modelID: model.modelID,
-  name: model.name,
-  cost: model.cost,
-  limit: model.limit,
-  variants: model.variants,
-})
 
 const fromPromise = <A>(run: () => Promise<A>): Effect.Effect<A, unknown> =>
   Effect.tryPromise({ try: run, catch: (cause) => cause })

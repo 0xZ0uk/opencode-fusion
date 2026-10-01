@@ -1,7 +1,7 @@
 import { describe, it } from "node:test"
 import assert from "node:assert/strict"
-import { createPairing, type Dialogs, type SelectOption, type WizardModel } from "../src/pairing.ts"
-import type { ModelRef } from "../src/pair.ts"
+import { createPairing, toWizardModel, type Dialogs, type SelectOption, type WizardModel } from "../src/pairing.ts"
+import { toHostModel, type ModelRef } from "../src/pair.ts"
 
 // --- fakes -------------------------------------------------------------------
 
@@ -42,6 +42,20 @@ function wizard(models: readonly WizardModel[], answers: readonly (string | unde
   const { dialogs, asks, toasts } = fakeDialogs(answers)
   const pickPair = createPairing({ dialogs, catalogue: { models: async () => models } })
   return { pickPair, asks, toasts }
+}
+
+const hostModel = (providerID: string, id: string, upstream: string, extra: Partial<WizardModel> = {}) => {
+  const { cost, variants, limit, ...rest } = extra
+  return {
+    id,
+    providerID,
+    modelID: upstream,
+    name: `${id} name`,
+    cost: [...(cost ?? [])],
+    variants: (variants ?? [{ id: "high" }, { id: "max" }]).map((variant) => ({ ...variant })),
+    limit: { context: 0, output: 0, ...(limit ?? {}) },
+    ...rest,
+  }
 }
 
 const GPT = model("openai", "gpt-5.6-sol")
@@ -280,6 +294,75 @@ describe("warnings", () => {
     const result = await pickPair()
 
     assert.deepEqual(result?.warnings, [])
+  })
+})
+
+describe("speed aliases", () => {
+  const ASTRA_BASE = hostModel("openai", "gpt-6-astra", "gpt-6-astra", { variants: [{ id: "low" }, { id: "high" }] })
+  const ASTRA_FAST = hostModel("openai", "gpt-6-astra-fast", "gpt-6-astra", { variants: [{ id: "fast" }] })
+  const ASTRA_ULTRA = hostModel("openai", "gpt-6-astra-ultrafast", "gpt-6-astra", { variants: [{ id: "ultra" }] })
+  const ASTRA = [ASTRA_BASE, ASTRA_FAST, ASTRA_ULTRA].map(toWizardModel)
+
+  it("adapts the host id as modelID so alias rows are unique", async () => {
+    const { pickPair, asks } = wizard(ASTRA, ["Custom", undefined])
+
+    await pickPair()
+
+    assert.equal(ASTRA[0]?.modelID, "gpt-6-astra")
+    assert.equal(ASTRA[1]?.modelID, "gpt-6-astra-fast")
+    assert.equal(ASTRA[2]?.modelID, "gpt-6-astra-ultrafast")
+    const values = asks[1]?.options.map((option) => option.value) ?? []
+    assert.deepEqual(values, ["openai|gpt-6-astra", "openai|gpt-6-astra-fast", "openai|gpt-6-astra-ultrafast"])
+    assert.equal(new Set(values).size, 3)
+  })
+
+  it("a current alias key matches exactly its own row, not every alias row", async () => {
+    const { pickPair, asks } = wizard(ASTRA, ["Custom", "openai|gpt-6-astra-fast", "fast", "openai|gpt-6-astra-ultrafast", "ultra"])
+
+    await pickPair({
+      lead: { providerID: "openai", modelID: "gpt-6-astra-fast" },
+      sidekick: { providerID: "openai", modelID: "gpt-6-astra-ultrafast" },
+    })
+
+    assert.equal(asks[1]?.current, "openai|gpt-6-astra-fast")
+    const leadRows = (asks[1]?.options ?? []).filter((option) => option.value === asks[1]?.current)
+    assert.equal(leadRows.length, 1)
+    assert.equal(asks[3]?.current, "openai|gpt-6-astra-ultrafast")
+    const sidekickRows = (asks[3]?.options ?? []).filter((option) => option.value === asks[3]?.current)
+    assert.equal(sidekickRows.length, 1)
+  })
+
+  it("chosen aliases persist their own ids and effort lists", async () => {
+    const { pickPair, asks } = wizard(ASTRA, ["Custom", "openai|gpt-6-astra-fast", "fast", "openai|gpt-6-astra-ultrafast", "ultra"])
+
+    const result = await pickPair({ lead: { providerID: "openai", modelID: "gpt-6-astra", variant: "high" } })
+
+    assert.deepEqual(asks[2]?.options.map((option) => option.value), ["", "fast"])
+    assert.deepEqual(asks[4]?.options.map((option) => option.value), ["", "ultra"])
+    assert.equal(asks[2]?.current, "")
+    assert.deepEqual(result?.pair.lead, { providerID: "openai", modelID: "gpt-6-astra-fast", variant: "fast" })
+    assert.deepEqual(result?.pair.sidekick, { providerID: "openai", modelID: "gpt-6-astra-ultrafast", variant: "ultra" })
+    assert.deepEqual(toHostModel(result!.pair.lead), { id: "gpt-6-astra-fast", providerID: "openai", variant: "fast" })
+    assert.deepEqual(toHostModel(result!.pair.sidekick), { id: "gpt-6-astra-ultrafast", providerID: "openai", variant: "ultra" })
+  })
+
+  it("a fitting preset resolves the base alias, not a faster alias listed first", async () => {
+    const models = [
+      hostModel("openai", "gpt-6-sol-fast", "gpt-6-sol"),
+      hostModel("openai", "gpt-6-sol", "gpt-6-sol"),
+      hostModel("openai", "gpt-6-luna-fast", "gpt-6-luna"),
+      hostModel("openai", "gpt-6-luna", "gpt-6-luna"),
+    ].map(toWizardModel)
+    const { pickPair, asks } = wizard(models, ["ChatGPT", "max", "high"])
+
+    const result = await pickPair()
+
+    assert.equal(asks[1]?.title, "Fusion 2/4 · Lead effort (gpt-6-sol name)")
+    assert.equal(asks[2]?.title, "Fusion 4/4 · Sidekick effort (gpt-6-luna name)")
+    assert.deepEqual(result?.pair, {
+      lead: { providerID: "openai", modelID: "gpt-6-sol", variant: "max" },
+      sidekick: { providerID: "openai", modelID: "gpt-6-luna", variant: "high" },
+    })
   })
 })
 

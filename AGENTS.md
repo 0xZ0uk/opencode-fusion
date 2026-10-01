@@ -82,3 +82,10 @@ interruption; the legacy facade still accepts an external `AbortSignal`.
 
 Verify with `npm run check` (tsc + node --test). Server/TUI lifecycle tests run
 `fusionSetup` / the bridge under a persistent `ManagedRuntime` + manual `Scope`.
+
+`ModelInfo.id` is the selectable alias id; `ModelInfo.modelID` is the shared
+upstream id several aliases can point at (e.g. speed aliases). Fusion's
+`ModelRef.modelID` stores the host id: `toWizardModel` in `src/pairing.ts`
+normalizes `id` into `WizardModel.modelID`, and the rate-card lookup in
+`src/costs.ts` matches `model.id === ref.modelID`, so aliases stay distinct in
+picker rows, preset resolution and persistence.

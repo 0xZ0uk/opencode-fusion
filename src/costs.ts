@@ -164,7 +164,7 @@ export function sourceOf(card: CostCard): string {
 }
 
 export function createCosts(
-  catalogue: () => Promise<readonly Pick<ModelInfo, "providerID" | "modelID" | "cost">[]>,
+  catalogue: () => Promise<readonly Pick<ModelInfo, "providerID" | "id" | "cost">[]>,
   load: () => Promise<unknown> = fetchModelsDev,
 ): (ref: ModelRef) => Promise<CostCard> {
   let cached: { at: number; data: unknown } | undefined
@@ -188,7 +188,7 @@ export function createCosts(
 
   return async (ref: ModelRef): Promise<CostCard> => {
     const models = await catalogue()
-    const found = models.find((model) => model.providerID === ref.providerID && model.modelID === ref.modelID)
+    const found = models.find((model) => model.providerID === ref.providerID && model.id === ref.modelID)
     const costs = found?.cost ?? []
     if (costs.length > 0) return { costs, source: CATALOGUE_SOURCE }
     let data: unknown
