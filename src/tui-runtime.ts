@@ -2,7 +2,6 @@ import { Effect, Exit, Fiber, Layer, ManagedRuntime, Scope } from "effect"
 
 export interface TuiRuntime {
   runPromise<A, E>(effect: Effect.Effect<A, E>): Promise<A>
-  runScoped<A, E>(effect: Effect.Effect<A, E>): Promise<A>
   register<A>(resource: A, release: (resource: A) => void): A
   isDisposed(): boolean
   dispose(): Promise<void>
@@ -32,7 +31,6 @@ export const createTuiRuntime = (): TuiRuntime => {
 
   return {
     runPromise,
-    runScoped: runPromise,
     register,
     isDisposed: () => closed,
     dispose: () => {
