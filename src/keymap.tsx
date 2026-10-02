@@ -11,9 +11,10 @@
  * component's lifetime, so the host unregisters it on cleanup.
  */
 import type { Plugin } from "@opencode/plugin/tui"
+import type { KeymapLayerClaim } from "./tui-commands.ts"
 
 /** The reactive layer `context.keymap.layer` expects. */
-export type FusionKeymapLayer = Parameters<Plugin.Context["keymap"]["layer"]>[0]
+export type FusionKeymapLayer = KeymapLayerClaim
 
 function FusionKeymap(props: { context: Plugin.Context; layer: FusionKeymapLayer }) {
   props.context.keymap.layer(props.layer)

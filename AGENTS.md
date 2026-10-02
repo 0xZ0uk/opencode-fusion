@@ -5,7 +5,8 @@ plugin (`src/server.ts`), a TUI plugin (`src/tui.ts` + `src/status.tsx` +
 `src/keymap.tsx` + `src/savings-dialog.tsx`), a shared RPC contract
 (`src/rpc.ts`), and helper modules
 (`src/pair.ts`, `src/presets.ts`, `src/pairing.ts`, `src/statusline.ts`,
-`src/policy.ts`, `src/prompts.ts`, `src/handoffs.ts`, `src/registry.ts`,
+`src/status-lifecycle.ts`, `src/tui-commands.ts`, `src/policy.ts`,
+`src/prompts.ts`, `src/handoffs.ts`, `src/registry.ts`,
 `src/sidekick-sessions.ts`, `src/sidekick-state.ts`, `src/costs.ts`,
 `src/savings.ts`, `src/savings-table.ts`, `src/version.ts`,
 `src/tui-activation.ts`).
@@ -31,9 +32,23 @@ bundler, no JSX transform. Consequences:
 - `src/status.tsx`, `src/keymap.tsx` and `src/savings-dialog.tsx` are the only
   JSX files; none is imported by tests. Keep logic out of them — anything worth
   testing belongs in a `.ts` module. All three hold wiring only: the status
-  sentence's predicate and text live in `src/statusline.ts`, the `/fusion` walk
-  in `src/pairing.ts`, and the savings dialog's rows/notes in
-  `src/savings-table.ts` fed by `collectSavings` in `src/savings.ts`.
+  sentence's predicate and text live in `src/statusline.ts`, the state and
+  refreshes behind the slot in `src/status-lifecycle.ts`, the `/fusion` walk in
+  `src/pairing.ts` behind the command flows in `src/tui-commands.ts`, and the
+  savings dialog's rows/notes in `src/savings-table.ts` fed by
+  `collectSavings` in `src/savings.ts`.
+- The TUI's two behavioural modules are JSX-free and own their public surface
+  whole: `startStatusLifecycle(context, fusion, runtime)` returns the claim
+  input `claimStatus` needs plus one aggregate disposer, and
+  `createFusionCommands(...)` returns the layer factory `claimKeymap` needs.
+  `src/tui.ts` is V2 setup/cleanup and the two claims only. `tui-commands`
+  injects just the savings presenter and the lifecycle's session snapshot;
+  everything else (pairing, savings, costs, activation) is a real import.
+- Pair consistency is RPC-event-only: a successful `setPair` never writes the
+  status state. The server's `pairChanged` event is the only refresh, and
+  `status-lifecycle`'s monotonic revision drops a read a newer one overtook.
+  Tests drive the modules through those public functions, including the
+  returned keymap commands' `run`.
 - `src/sidekick-state.ts` takes structural session types and imports nothing, so
   the TUI can hand it the host's own `SessionInfo[]` with no adapter type.
 - Test files import sources with explicit `.ts` extensions
@@ -74,15 +89,21 @@ signal; per-call progress fibers fork into a call-scoped `Scope`.
 The TUI host is Promise-only: `src/tui-runtime.ts` bridges one
 `ManagedRuntime` + owned `Scope` per setup (`withTuiRuntime` releases
 acquired disposers on setup failure; `dispose()` is idempotent and always
-disposes the runtime). All TUI jobs — including wizard dialog adapters — run
-through the scope-tracked `runPromise`, so follow-up callbacks and jobs are scoped to the plugin's lifetime and
-reject rather than touch the host after unload.
+disposes the runtime). `runPromise` is the only way in — there is no
+per-command scope, so a command's job lives and dies with the plugin. All TUI
+jobs — including wizard dialog adapters — run through it, so follow-up
+callbacks and jobs are scoped to the plugin's lifetime and reject rather than
+touch the host after unload. Resources the plugin owns (the lifecycle, the two
+slot claims) are handed to `register`, which releases them in reverse order on
+scope close.
 
 Native `Tool.Context` has no `signal`: tool cancellation is Effect
 interruption; the legacy facade still accepts an external `AbortSignal`.
 
 Verify with `npm run check` (tsc + node --test). Server/TUI lifecycle tests run
-`fusionSetup` / the bridge under a persistent `ManagedRuntime` + manual `Scope`.
+`fusionSetup` / the bridge / the two TUI modules under a persistent
+`ManagedRuntime` + manual `Scope`, driving a structural fake `Plugin.Context`
+wherever a host surface is needed.
 
 `ModelInfo.id` is the selectable alias id; `ModelInfo.modelID` is the shared
 upstream id several aliases can point at (e.g. speed aliases). Fusion's

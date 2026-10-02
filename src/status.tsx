@@ -4,29 +4,20 @@
  * The prompt-footer status slot: shows the active pair on lead sessions, and
  * whether a sidekick handoff is running. The host provides `@opentui/solid`
  * and `solid-js` at runtime.
+ *
+ * Wiring only. The state it renders and the host snapshot behind it are owned
+ * by `status-lifecycle.ts`; the sentence's predicate and text live in
+ * `statusline.ts`.
  */
 import type { Plugin } from "@opencode/plugin/tui"
 import { Show } from "solid-js"
 import { sidekickRunning, type SidekickSession } from "./sidekick-state.ts"
-import { isLeadSession, statusText, type StatusLineState } from "./statusline.ts"
-
-export type FusionStatusState = StatusLineState & {
-  /**
-   * Bumped by the TUI plugin on every session event. `data.session.*` is not a
-   * reactive read, so this is what pulls a fresh host snapshot into the render.
-   */
-  sessionsVersion: number
-}
-
-export type FusionStatusDeps = {
-  readonly state: FusionStatusState
-  /** The host's sessions in the shape the sidekick-state derivation reads. */
-  readonly sessions: () => readonly SidekickSession[]
-}
+import type { StatusClaim, StatusLineStore } from "./status-lifecycle.ts"
+import { isLeadSession, statusText } from "./statusline.ts"
 
 function FusionStatus(props: {
   context: Plugin.Context
-  state: FusionStatusState
+  state: StatusLineStore
   sessions: () => readonly SidekickSession[]
   sessionID: string | undefined
 }) {
@@ -50,11 +41,11 @@ function FusionStatus(props: {
 }
 
 /** Claims `prompt.footer.status`; returns the slot disposer. */
-export function claimStatus(context: Plugin.Context, deps: FusionStatusDeps): () => void {
+export function claimStatus(context: Plugin.Context, claim: StatusClaim): () => void {
   return context.ui.slot({
     append: "prompt.footer.status",
     render: (input) => (
-      <FusionStatus context={context} state={deps.state} sessions={deps.sessions} sessionID={input.sessionID} />
+      <FusionStatus context={context} state={claim.state} sessions={claim.sessions} sessionID={input.sessionID} />
     ),
   })
 }
